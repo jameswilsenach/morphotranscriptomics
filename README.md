@@ -1,4 +1,4 @@
-# Single Cell Morphotranscriptomics Project — Handover Guide & Documentation
+# Single Cell Morphotranscriptomics Project
 
 Welcome to the **Single Cell Morphotranscriptomics Analysis Pipeline**. This repository contains modular, reproducible Python scripts, environment specifications, and a master execution pipeline designed to analyze single-cell transcriptomics integrated with imaging flow cytometry morphology data across megakaryocyte polyploidization states ($2\text{n}, 4\text{n}, 8\text{n}, 16\text{n}, 32\text{n}$).
 
