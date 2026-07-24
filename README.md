@@ -189,6 +189,3 @@ python 04b_mvae_multimodal_analysis.py --epochs 100 --latent_dim 10 --out_dir "o
 | `05_pathway_wordcloud.png` | Biological pathway WordCloud | Step 5 |
 
 ---
-
-## ❓ Support & Questions
-For any questions regarding dataset paths or script execution, refer to `GEMINI.md` for project standards or inspect `walkthrough.md`.
