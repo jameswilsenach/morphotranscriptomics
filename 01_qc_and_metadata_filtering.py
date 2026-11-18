@@ -4,9 +4,10 @@
 Ingests single cell morphotranscriptomics expression metadata and applies quality control (QC)
 filtering based on morphotrans2 notebook methods.
 
-Handles metadata formatting inconsistencies between Train (D:\\Morphotranscriptomic_Data) and Test/Pilot (exp/).
+Supports the unified metadata file (Metadata_merged_YL_SF_20.10.26_v2.csv) combining all animals
+across pilot and validation cohorts (M1-M7) for Leave-One-Animal-Out Cross-Validation (LOAOCV).
 
-Exact morphotrans2 QC Filter Criteria (Yields 291 QC-passed cells on Train dataset):
+Exact morphotrans2 QC Filter Criteria (Yields 393 QC-passed cells across M1-M7, 291 on M1-M5):
 1. Contaminated == False
 2. Supervised_ploidy in ['2n', '4n', '8n', '16n', '32n'] (excludes '64n' and NaN)
 3. control == 0 / False
@@ -15,7 +16,7 @@ Exact morphotrans2 QC Filter Criteria (Yields 291 QC-passed cells on Train datas
 6. kallisto.nb_mapped > 20,000
 
 Usage:
-    python 01_qc_and_metadata_filtering.py --train_dir "D:\\Morphotranscriptomic_Data" --test_dir "exp" --out_dir "output"
+    python 01_qc_and_metadata_filtering.py --metadata_file "C:\\Users\\vilsn\\Dropbox\\Work\\Turing\\Exploration_Data\\Metadata_merged_YL_SF_20.10.26_v2.csv" --out_dir "output"
 """
 
 import argparse
@@ -35,20 +36,22 @@ def setup_plot_style():
     sns.set_theme(style="whitegrid")
 
 
-def normalize_metadata(df, dataset_name="Train"):
+def normalize_metadata(df, dataset_name="Combined"):
     """
-    Harmonizes column naming and data types across formatting inconsistencies
-    between Train (D:\\Morphotranscriptomic_Data) and Test/Pilot (exp/) datasets.
+    Harmonizes column naming and data types across formatting inconsistencies,
+    assigning animal (mouse) and plate identifiers (M1p1 = mouse 1 plate 1, etc.).
     """
     df = df.copy()
 
     # Standardize sample identifier column to 'SampleID'
-    if "SampleID" not in df.columns:
-        if "Well" in df.columns:
+    if "SampleID" not in df.columns or df["SampleID"].isna().all():
+        if "Well_ID" in df.columns:
+            df["SampleID"] = df["Well_ID"]
+        elif "Well" in df.columns:
             df["SampleID"] = df["Well"]
         elif "Barcode" in df.columns:
             df["SampleID"] = df["Barcode"]
-        elif df.index.name in ["SampleID", "Well", "Barcode"]:
+        elif df.index.name in ["SampleID", "Well", "Barcode", "Well_ID"]:
             df["SampleID"] = df.index
         else:
             df["SampleID"] = df.iloc[:, 0].astype(str)
@@ -56,10 +59,27 @@ def normalize_metadata(df, dataset_name="Train"):
     df["SampleID"] = df["SampleID"].astype(str)
     df.set_index("SampleID", drop=False, inplace=True)
 
+    # Standardize Animal / Mouse column (e.g. M1, M2, M3, M4, M5, M6, M7)
+    if "mouse" in df.columns and not df["mouse"].isna().all():
+        df["mouse"] = df["mouse"].astype(str).str.strip()
+    elif "Sample_Plate" in df.columns:
+        # Extract mouse ID from plate name (e.g. M1p1 -> M1, M6p2 -> M6)
+        extracted = df["Sample_Plate"].astype(str).str.extract(r'^(M\d+)', expand=False)
+        df["mouse"] = extracted.fillna("Unknown")
+    elif "orig.ident" in df.columns:
+        extracted = df["orig.ident"].astype(str).str.extract(r'^(M\d+)', expand=False)
+        df["mouse"] = extracted.fillna("Unknown")
+    else:
+        df["mouse"] = "Unknown"
+
+    df["fold"] = df["mouse"]
+
     # Standardize Ploidy column
     if "Supervised_ploidy" not in df.columns:
         if "Estimated_Ploidy_D.NA.A" in df.columns:
             df["Supervised_ploidy"] = df["Estimated_Ploidy_D.NA.A"]
+        elif "Supervised_Ploidy_Images" in df.columns:
+            df["Supervised_ploidy"] = df["Supervised_Ploidy_Images"]
         elif "ploidy" in df.columns:
             df["Supervised_ploidy"] = df["ploidy"]
         else:
@@ -100,18 +120,41 @@ def normalize_metadata(df, dataset_name="Train"):
 
     df["kallisto.nb_mapped"] = pd.to_numeric(df.get("kallisto.nb_mapped", np.nan), errors="coerce")
     df["kallisto.pc_map"] = pd.to_numeric(df.get("kallisto.pc_map", np.nan), errors="coerce")
-    df["dataset_type"] = dataset_name
+    
+    if "dataset" in df.columns:
+        df["dataset_type"] = df["dataset"]
+    else:
+        df["dataset_type"] = dataset_name
 
     return df
 
 
-def load_metadata_sources(train_dir, test_dir):
+def load_metadata_sources(metadata_file=None, train_dir=r"D:\Morphotranscriptomic_Data", test_dir="exp"):
     """
-    Loads metadata from both Train (D:\\Morphotranscriptomic_Data) and local Test/Pilot directories.
+    Loads metadata preferring the unified multi-animal file (Metadata_merged_YL_SF_20.10.26_v2.csv)
+    or falls back to legacy Train and Test/Pilot directories.
     """
+    # 1. Check direct unified metadata path
+    candidate_paths = []
+    if metadata_file:
+        candidate_paths.append(metadata_file)
+    candidate_paths.extend([
+        r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\Metadata_merged_YL_SF_20.10.26_v2.csv",
+        "Metadata_merged_YL_SF_20.10.26_v2.csv",
+        os.path.join(train_dir, "Metadata_merged_YL_SF_20.10.26_v2.csv"),
+    ])
+
+    for path in candidate_paths:
+        if path and os.path.exists(path):
+            print(f"[Metadata] Loading unified cross-cohort metadata file: {os.path.abspath(path)}")
+            merged_df = pd.read_csv(path)
+            norm_df = normalize_metadata(merged_df, dataset_name="Combined_Cohort")
+            return norm_df
+
+    # 2. Legacy fallback: separate Train and Pilot directories
+    print("[Metadata] Unified file not found. Falling back to multi-file directory ingestion...")
     metadata_frames = []
 
-    # 1. Train Metadata Files
     train_meta_path = os.path.join(train_dir, "Metadata_flow+well_id+supervised_ploidy.csv")
     train_contam_path = os.path.join(train_dir, "expression", "meta.contaminant.2.tsv")
 
@@ -125,7 +168,6 @@ def load_metadata_sources(train_dir, test_dir):
         if os.path.exists(train_meta_path):
             train_flow_df = pd.read_csv(train_meta_path)
             norm_train_flow = normalize_metadata(train_flow_df, dataset_name="Train")
-            # Merge flow ploidy into contaminant metadata
             merged_train = norm_train_contam.merge(
                 norm_train_flow[["Supervised_ploidy"]],
                 left_index=True,
@@ -139,7 +181,6 @@ def load_metadata_sources(train_dir, test_dir):
         else:
             metadata_frames.append(norm_train_contam)
 
-    # 2. Test / Pilot Metadata Files (Local fallback)
     local_meta_path = "meta.v1+flowSF.csv"
     if os.path.exists(local_meta_path):
         local_df = pd.read_csv(local_meta_path)
@@ -147,7 +188,7 @@ def load_metadata_sources(train_dir, test_dir):
         metadata_frames.append(norm_local)
 
     if not metadata_frames:
-        raise FileNotFoundError(f"No valid metadata files found in {train_dir} or local directory.")
+        raise FileNotFoundError(f"No valid metadata files found in candidate paths, {train_dir}, or {test_dir}.")
 
     combined_meta = pd.concat(metadata_frames, axis=0, ignore_index=False)
     combined_meta = combined_meta.loc[~combined_meta.index.duplicated(keep="first")]
@@ -199,14 +240,16 @@ def plot_qc_metrics(df, out_dir):
     fig, ax = plt.subplots(1, 2, figsize=(14, 5))
     
     valid_df = df[df["Supervised_ploidy"].isin(["2n", "4n", "8n", "16n", "32n", "64n"])]
-    sns.countplot(data=valid_df, x="Supervised_ploidy", hue="dataset_type", ax=ax[0], palette="viridis")
+    hue_col = "dataset_type" if "dataset_type" in df.columns else None
+    sns.countplot(data=valid_df, x="Supervised_ploidy", hue=hue_col, ax=ax[0], palette="viridis")
     ax[0].set_title("All Cells: Supervised Ploidy Distribution", fontsize=12, fontweight="bold")
     ax[0].set_xlabel("Supervised Ploidy State")
     ax[0].set_ylabel("Cell Count")
 
     passed_df = df[df["qc_pass"] & df["Supervised_ploidy"].isin(["2n", "4n", "8n", "16n", "32n"])]
-    sns.countplot(data=passed_df, x="Supervised_ploidy", hue="dataset_type", ax=ax[1], palette="crest")
-    ax[1].set_title("QC-Passed Cells: Supervised Ploidy Distribution (Benchmark: 291 cells)", fontsize=12, fontweight="bold")
+    sns.countplot(data=passed_df, x="Supervised_ploidy", hue=hue_col, ax=ax[1], palette="crest")
+    total_passed = len(passed_df)
+    ax[1].set_title(f"QC-Passed Cells: Supervised Ploidy Distribution (Total: {total_passed} cells)", fontsize=12, fontweight="bold")
     ax[1].set_xlabel("Supervised Ploidy State")
     ax[1].set_ylabel("Cell Count")
 
@@ -215,23 +258,36 @@ def plot_qc_metrics(df, out_dir):
     plt.savefig(fig1_path)
     plt.close()
 
-    # Figure 2: Violin plots of mapped reads & mapping % across ploidies for Train set
-    train_passed = passed_df[passed_df["kallisto.nb_mapped"].notna()]
-    if not train_passed.empty:
+    # Figure 2: Ploidy breakdown by Animal (Mouse M1-M7) for Leave-One-Animal-Out CV
+    if "mouse" in passed_df.columns and passed_df["mouse"].nunique() > 1:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        mouse_order = sorted(passed_df["mouse"].unique())
+        sns.countplot(data=passed_df, x="mouse", hue="Supervised_ploidy", order=mouse_order, palette="Spectral", ax=ax)
+        ax.set_title("QC-Passed Cells: Ploidy State Breakdown by Animal (LOAOCV Cohort)", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Animal / Mouse ID (Leave-One-Animal-Out Folds)")
+        ax.set_ylabel("Cell Count")
+        plt.tight_layout()
+        fig_mouse_path = os.path.join(out_dir, "01_ploidy_by_animal_qc.png")
+        plt.savefig(fig_mouse_path)
+        plt.close()
+
+    # Figure 3: Violin plots of mapped reads & mapping % across ploidies
+    passed_with_reads = passed_df[passed_df["kallisto.nb_mapped"].notna()]
+    if not passed_with_reads.empty:
         fig, ax = plt.subplots(1, 2, figsize=(14, 5))
 
-        sns.violinplot(data=train_passed, x="Supervised_ploidy", y="kallisto.nb_mapped", ax=ax[0], inner="quartile", palette="Set2")
+        sns.violinplot(data=passed_with_reads, x="Supervised_ploidy", y="kallisto.nb_mapped", ax=ax[0], inner="quartile", palette="Set2")
         ax[0].set_title("Kallisto Mapped Reads by Ploidy", fontsize=12, fontweight="bold")
         ax[0].set_ylabel("Mapped Read Count")
         ax[0].set_yscale("log")
 
-        sns.violinplot(data=train_passed, x="Supervised_ploidy", y="kallisto.pc_map", ax=ax[1], inner="quartile", palette="Set2")
+        sns.violinplot(data=passed_with_reads, x="Supervised_ploidy", y="kallisto.pc_map", ax=ax[1], inner="quartile", palette="Set2")
         ax[1].set_title("Kallisto Mapping Percentage (%) by Ploidy", fontsize=12, fontweight="bold")
         ax[1].set_ylabel("% Mapped Reads")
 
         plt.tight_layout()
-        fig2_path = os.path.join(out_dir, "01_kallisto_qc_metrics_violin.png")
-        plt.savefig(fig2_path)
+        fig3_path = os.path.join(out_dir, "01_kallisto_qc_metrics_violin.png")
+        plt.savefig(fig3_path)
         plt.close()
 
     print(f"[QC Plotting] Saved QC visualization figures to: {os.path.abspath(out_dir)}")
@@ -239,6 +295,7 @@ def plot_qc_metrics(df, out_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="01: Single Cell Morphotranscriptomics Quality Control & Metadata Filtering")
+    parser.add_argument("--metadata_file", type=str, default=r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\Metadata_merged_YL_SF_20.10.26_v2.csv", help="Path to unified multi-animal metadata CSV")
     parser.add_argument("--train_dir", type=str, default=r"D:\Morphotranscriptomic_Data", help="Path to main Train data directory")
     parser.add_argument("--test_dir", type=str, default="exp", help="Path to local Test/Pilot expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output CSVs and plots")
@@ -246,18 +303,28 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"=== STEP 01: QUALITY CONTROL & METADATA FILTERING ===")
+    print(f"Metadata file  : {args.metadata_file}")
     print(f"Train directory: {args.train_dir}")
     print(f"Test directory : {args.test_dir}")
 
     # Load and harmonize metadata
-    meta_df = load_metadata_sources(args.train_dir, args.test_dir)
+    meta_df = load_metadata_sources(metadata_file=args.metadata_file, train_dir=args.train_dir, test_dir=args.test_dir)
     print(f"Total raw metadata records loaded: {len(meta_df)}")
 
     # Apply QC filters
     full_df, qc_df = apply_qc_filters(meta_df)
-    print(f"Total cells passing ALL QC FILTERS: {len(qc_df)} (Target morphotrans2 benchmark: 291 cells)")
+    print(f"Total cells passing ALL QC FILTERS: {len(qc_df)} (Combined M1-M7 cohort: 393 cells; Benchmark M1-M5: 291 cells)")
 
-    if "Supervised_ploidy" in qc_df.columns:
+    if "mouse" in qc_df.columns:
+        print("\nQC-passed cells per animal (Leave-One-Animal-Out folds):")
+        animal_summary = qc_df.groupby("mouse")["Supervised_ploidy"].value_counts().unstack().fillna(0).astype(int)
+        animal_summary["Total"] = animal_summary.sum(axis=1)
+        print(animal_summary.to_string())
+        per_animal_csv = os.path.join(args.out_dir, "qc_filtering_summary_per_animal.csv")
+        animal_summary.to_csv(per_animal_csv)
+        print(f"Saved animal summary to: {os.path.abspath(per_animal_csv)}")
+
+    elif "Supervised_ploidy" in qc_df.columns:
         print("\nPloidy breakdown of QC-passed cells:")
         print(qc_df["Supervised_ploidy"].value_counts().to_string())
 
@@ -267,7 +334,8 @@ def main():
         "Contaminated_Cells": int(full_df["Contaminated_bool"].sum()),
         "Valid_Ploidy_Cells": int(full_df["Supervised_ploidy"].isin(["2n", "4n", "8n", "16n", "32n"]).sum()),
         "Single_Cells": int(full_df["single_cell"].sum()),
-        "QC_Passed_Cells": len(qc_df)
+        "QC_Passed_Cells": len(qc_df),
+        "Total_Animals": int(qc_df["mouse"].nunique()) if "mouse" in qc_df.columns else 0
     }
     summary_df = pd.DataFrame([summary_dict])
     summary_csv = os.path.join(args.out_dir, "qc_filtering_summary.csv")
