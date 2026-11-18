@@ -1,19 +1,21 @@
 """
 04_mofa_multimodal_analysis.py
 ------------------------------
-Trains and evaluates Multi-Omics Factor Analysis (MOFA) models integrating single-cell
-transcriptomics (RNA) and imaging flow cytometry (Morphology) data matching morphotrans2 notebook.
+Trains and evaluates Multi-Omics Factor Analysis (MOFA2) models integrating single-cell
+transcriptomics (RNA) and imaging flow cytometry (Morphology) data.
 
 Workflow:
-1. Ingests transcriptomics (top 2000 HVGs, scaled) and morphology/flow metadata.
-2. Extracts imaging morphology features matching morphotrans2 regex patterns.
-3. Sets up and trains mofapy2 entry point model (10 factors, seed=42, fast convergence).
+1. Ingests transcriptomics (top 2000 HVGs selected on log1p-normalized expression) and morphology/flow metadata.
+2. Applies likelihood-appropriate normalization/standardization per view:
+   - RNA view (default: 'poisson'): non-negative integer counts (raw counts or library size-factor normalized counts, without StandardScaler centering).
+   - Morphology view (default: 'gaussian'): z-score standardized via StandardScaler (with optional signed log1p transformation).
+3. Sets up and trains mofapy2 entry point model with view-specific likelihoods (default: ['poisson', 'gaussian'], 10 factors, seed=42).
 4. Saves/loads mofa_model_rna_morphology.hdf5 model file.
-5. Computes R2 variance decomposition per view using mofax.
+5. Computes R2 / variance decomposition per view using mofax.
 6. Plots factor loadings and factor scatter projections colored by Supervised Ploidy.
 
 Usage:
-    python 04_mofa_multimodal_analysis.py --train_dir "D:\\Morphotranscriptomic_Data" --out_dir "output"
+    python 04_mofa_multimodal_analysis.py --exp_dir "D:\\Morphotranscriptomic_Data\\expression" --out_dir "output" --rna_likelihood poisson
 """
 
 import argparse
@@ -62,13 +64,112 @@ def extract_morphology_features(meta_df):
             numeric_img_cols.append(col)
 
     img_df = meta_df[numeric_img_cols].dropna(axis=1, how="all").fillna(0)
-    print(f"Extracted {len(numeric_img_cols)} morphology/flow features.")
+    # Drop constant/zero-variance features to avoid degenerate precision updates in MOFA2
+    non_const_cols = img_df.columns[img_df.std(axis=0) > 0]
+    img_df = img_df[non_const_cols]
+    print(f"Extracted {len(img_df.columns)} non-constant morphology/flow features.")
     return img_df
 
 
-def prepare_mofa_input_matrices(exp_dir, qc_meta_path, n_hvg=2000):
+def normalize_rna_for_likelihood(df_rna_counts, likelihood="poisson", rna_norm="raw_counts"):
     """
-    Ingests and scales RNA expression and Morphology data for common QC-passed cells.
+    Transforms the HVG RNA expression matrix to match the chosen MOFA2 likelihood requirements:
+      - 'poisson': Non-negative integer counts (either raw counts or library size-factor scaled counts).
+                   Must NOT be z-score centered (no negative values allowed).
+      - 'bernoulli': Binary detection matrix (0.0 or 1.0).
+      - 'gaussian': Library-size normalized + log1p transformed + StandardScaler z-scored.
+    """
+    df_clean = df_rna_counts.clip(lower=0).fillna(0)
+
+    if likelihood == "poisson":
+        if rna_norm == "size_factor_counts":
+            lib_sizes = df_clean.sum(axis=1)
+            median_lib = np.median(lib_sizes[lib_sizes > 0]) if (lib_sizes > 0).any() else 1.0
+            size_factors = (lib_sizes / median_lib).replace(0, 1.0)
+            df_scaled = df_clean.div(size_factors, axis=0)
+            # Poisson likelihood in mofapy2 requires non-negative integer counts
+            df_out = np.rint(df_scaled).clip(lower=0).astype(np.float64)
+            print("RNA view prepared for 'poisson' likelihood: size-factor normalized & rounded to integer counts.")
+        else:
+            # Ensure non-negative integer counts (kallisto abundance estimates may be fractional)
+            df_out = np.rint(df_clean).clip(lower=0).astype(np.float64)
+            print("RNA view prepared for 'poisson' likelihood: unscaled non-negative integer counts.")
+        return df_out
+
+    elif likelihood == "bernoulli":
+        df_out = (df_clean > 0).astype(np.float64)
+        print("RNA view prepared for 'bernoulli' likelihood: binarized (0/1) gene detection matrix.")
+        return df_out
+
+    elif likelihood == "gaussian":
+        lib_sizes = df_clean.sum(axis=1).replace(0, 1.0)
+        df_cpm = df_clean.div(lib_sizes, axis=0) * 1e4
+        df_log = np.log1p(df_cpm)
+        scaler = StandardScaler()
+        df_out = pd.DataFrame(
+            scaler.fit_transform(df_log),
+            index=df_clean.index,
+            columns=df_clean.columns
+        )
+        print("RNA view prepared for 'gaussian' likelihood: CP10K + log1p + StandardScaler.")
+        return df_out
+
+    else:
+        raise ValueError(f"Unsupported MOFA2 likelihood for RNA: {likelihood}")
+
+
+def normalize_morphology_for_likelihood(img_df, likelihood="gaussian", log_morph=False):
+    """
+    Transforms the Morphology feature matrix to match the chosen MOFA2 likelihood:
+      - 'gaussian': Optional signed log1p followed by StandardScaler (mean=0, unit variance).
+      - 'poisson': Shifted/clipped non-negative integer counts.
+      - 'bernoulli': Binarized above median.
+    """
+    if likelihood == "gaussian":
+        df_proc = img_df.copy()
+        if log_morph:
+            # Signed log1p handles heavy-tailed flow/imaging intensities while preserving sign
+            df_proc = np.sign(df_proc) * np.log1p(np.abs(df_proc))
+        scaler_img = StandardScaler()
+        scaled_img = pd.DataFrame(
+            scaler_img.fit_transform(df_proc),
+            index=img_df.index,
+            columns=img_df.columns
+        )
+        norm_desc = "signed-log1p + StandardScaler" if log_morph else "StandardScaler (z-score)"
+        print(f"Morphology view prepared for 'gaussian' likelihood: {norm_desc}.")
+        return scaled_img
+
+    elif likelihood == "poisson":
+        # Shift each column so minimum is 0 and round to integer counts
+        col_mins = img_df.min(axis=0).clip(upper=0)
+        df_shifted = img_df.sub(col_mins, axis=1)
+        df_out = np.rint(df_shifted).clip(lower=0).astype(np.float64)
+        print("Morphology view prepared for 'poisson' likelihood: non-negative integer counts.")
+        return df_out
+
+    elif likelihood == "bernoulli":
+        medians = img_df.median(axis=0)
+        df_out = (img_df > medians).astype(np.float64)
+        print("Morphology view prepared for 'bernoulli' likelihood: binarized above feature median.")
+        return df_out
+
+    else:
+        raise ValueError(f"Unsupported MOFA2 likelihood for Morphology: {likelihood}")
+
+
+def prepare_mofa_input_matrices(
+    exp_dir,
+    qc_meta_path,
+    n_hvg=2000,
+    rna_likelihood="poisson",
+    morph_likelihood="gaussian",
+    rna_norm="raw_counts",
+    log_morph=False
+):
+    """
+    Ingests and normalizes RNA expression and Morphology data for common QC-passed cells
+    according to the target MOFA2 view likelihoods.
     """
     import scanpy as sc
 
@@ -85,11 +186,6 @@ def prepare_mofa_input_matrices(exp_dir, qc_meta_path, n_hvg=2000):
 
     df_raw = adata.to_df()
 
-    # Select HVGs
-    gene_vars = df_raw.var(axis=0)
-    top_genes = gene_vars.nlargest(n_hvg).index
-    df_rna = df_raw[top_genes]
-
     # Load QC metadata for morphology features
     if qc_meta_path and os.path.exists(qc_meta_path):
         meta_df = pd.read_csv(qc_meta_path, index_col=0)
@@ -100,48 +196,65 @@ def prepare_mofa_input_matrices(exp_dir, qc_meta_path, n_hvg=2000):
         else:
             raise FileNotFoundError("Metadata table not found for morphology features.")
 
-    common_cells = df_rna.index.intersection(meta_df.index)
+    common_cells = df_raw.index.intersection(meta_df.index)
     if len(common_cells) == 0:
         print("Warning: No exact cell barcode overlap between RNA matrix and metadata. Aligning by index length.")
-        min_len = min(len(df_rna), len(meta_df))
-        df_rna = df_rna.iloc[:min_len]
+        min_len = min(len(df_raw), len(meta_df))
+        df_raw = df_raw.iloc[:min_len]
         meta_df = meta_df.iloc[:min_len]
-        common_cells = df_rna.index
+        common_cells = df_raw.index
 
-    df_rna = df_rna.loc[common_cells]
+    df_raw = df_raw.loc[common_cells]
     meta_df = meta_df.loc[common_cells]
+
+    # Select HVGs on log1p library-normalized expression to avoid raw-count mean-variance bias,
+    # then extract the corresponding genes from the raw count matrix
+    lib_sizes = df_raw.clip(lower=0).sum(axis=1).replace(0, 1.0)
+    df_log_norm = np.log1p(df_raw.clip(lower=0).div(lib_sizes, axis=0) * 1e4)
+    gene_vars = df_log_norm.var(axis=0)
+    # Only keep genes expressed in at least 1 cell with non-zero variance
+    active_genes = gene_vars[gene_vars > 0]
+    top_genes = active_genes.nlargest(min(n_hvg, len(active_genes))).index
+    df_rna_hvg = df_raw[top_genes]
 
     img_df = extract_morphology_features(meta_df)
 
-    # Standard scale both views
-    scaler_rna = StandardScaler()
-    scaled_rna = pd.DataFrame(
-        scaler_rna.fit_transform(df_rna),
-        index=df_rna.index,
-        columns=df_rna.columns
+    # Normalize each view according to its target likelihood
+    proc_rna = normalize_rna_for_likelihood(
+        df_rna_hvg,
+        likelihood=rna_likelihood,
+        rna_norm=rna_norm
     )
-
-    scaler_img = StandardScaler()
-    scaled_img = pd.DataFrame(
-        scaler_img.fit_transform(img_df),
-        index=img_df.index,
-        columns=img_df.columns
+    proc_img = normalize_morphology_for_likelihood(
+        img_df,
+        likelihood=morph_likelihood,
+        log_morph=log_morph
     )
 
     supervised_ploidy = meta_df.get("Supervised_ploidy", pd.Series("Unknown", index=common_cells))
 
-    return scaled_rna, scaled_img, supervised_ploidy
+    return proc_rna, proc_img, supervised_ploidy
 
 
-def run_mofa_training(df_rna, df_morphology, output_hdf5="mofa_model_rna_morphology.hdf5", factors=10):
+def run_mofa_training(
+    df_rna,
+    df_morphology,
+    output_hdf5="mofa_model_rna_morphology.hdf5",
+    factors=10,
+    rna_likelihood="poisson",
+    morph_likelihood="gaussian",
+    convergence_mode="fast",
+    max_iter=500
+):
     """
-    Sets up and trains mofapy2 model.
+    Sets up and trains mofapy2 model with view-specific likelihoods.
     """
     if not MOFAPY2_AVAILABLE:
         print("mofapy2 is not installed. Skipping model training.")
         return False
 
-    print("=== INITIALIZING MOFA MODEL TRAINING (mofapy2) ===")
+    likelihoods = [rna_likelihood, morph_likelihood]
+    print(f"=== INITIALIZING MOFA2 MODEL TRAINING (mofapy2, likelihoods={likelihoods}) ===")
     data_matrix = [
         [df_rna],
         [df_morphology]
@@ -156,14 +269,25 @@ def run_mofa_training(df_rna, df_morphology, output_hdf5="mofa_model_rna_morphol
         features_names=[df_rna.columns.tolist(), df_morphology.columns.tolist()]
     )
 
-    ent.set_data_options()
-    ent.set_model_options(factors=factors, spikeslab_weights=True, ard_weights=True)
-    ent.set_train_options(iter=500, convergence_mode="fast", seed=42, gpu_mode=False)
+    # scale_views=False is required when using non-Gaussian likelihoods in mofapy2
+    ent.set_data_options(scale_groups=False, scale_views=False)
+    ent.set_model_options(
+        factors=factors,
+        likelihoods=likelihoods,
+        spikeslab_weights=True,
+        ard_weights=True
+    )
+    ent.set_train_options(
+        iter=max_iter,
+        convergence_mode=convergence_mode,
+        seed=42,
+        gpu_mode=False
+    )
     ent.build()
     ent.run()
 
     ent.save(output_hdf5)
-    print(f"MOFA model successfully trained and saved to: {os.path.abspath(output_hdf5)}")
+    print(f"MOFA2 model successfully trained and saved to: {os.path.abspath(output_hdf5)}")
     return True
 
 
@@ -224,21 +348,67 @@ def evaluate_mofa_model(model_path, ploidy_series, out_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="04: Multi-Omics Factor Analysis (MOFA) Integration")
+    parser = argparse.ArgumentParser(description="04: Multi-Omics Factor Analysis (MOFA2) Integration")
     parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument("--factors", type=int, default=10, help="Number of latent factors")
+    parser.add_argument(
+        "--rna_likelihood",
+        type=str,
+        default="poisson",
+        choices=["poisson", "bernoulli", "gaussian"],
+        help="MOFA2 likelihood distribution for the RNA view (default: poisson)"
+    )
+    parser.add_argument(
+        "--morph_likelihood",
+        type=str,
+        default="gaussian",
+        choices=["gaussian", "poisson", "bernoulli"],
+        help="MOFA2 likelihood distribution for the Morphology view (default: gaussian)"
+    )
+    parser.add_argument(
+        "--rna_norm",
+        type=str,
+        default="raw_counts",
+        choices=["raw_counts", "size_factor_counts"],
+        help="Count normalization strategy for Poisson RNA likelihood (default: raw_counts)"
+    )
+    parser.add_argument(
+        "--log_morph",
+        action="store_true",
+        help="Apply signed log1p transform to Morphology features before StandardScaler"
+    )
+    parser.add_argument(
+        "--reuse_model",
+        action="store_true",
+        help="Reuse existing HDF5 model file if present instead of retraining"
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 04: MULTI-OMICS FACTOR ANALYSIS (MOFA) ===")
+    print(f"=== STEP 04: MULTI-OMICS FACTOR ANALYSIS (MOFA2) ===")
 
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
-    scaled_rna, scaled_img, ploidy_series = prepare_mofa_input_matrices(args.exp_dir, qc_meta_path, n_hvg=2000)
+    proc_rna, proc_img, ploidy_series = prepare_mofa_input_matrices(
+        args.exp_dir,
+        qc_meta_path,
+        n_hvg=2000,
+        rna_likelihood=args.rna_likelihood,
+        morph_likelihood=args.morph_likelihood,
+        rna_norm=args.rna_norm,
+        log_morph=args.log_morph
+    )
 
     model_hdf5 = "mofa_model_rna_morphology.hdf5"
-    if not os.path.exists(model_hdf5):
-        run_mofa_training(scaled_rna, scaled_img, output_hdf5=model_hdf5, factors=args.factors)
+    if not (args.reuse_model and os.path.exists(model_hdf5)):
+        run_mofa_training(
+            proc_rna,
+            proc_img,
+            output_hdf5=model_hdf5,
+            factors=args.factors,
+            rna_likelihood=args.rna_likelihood,
+            morph_likelihood=args.morph_likelihood
+        )
 
     evaluate_mofa_model(model_hdf5, ploidy_series, args.out_dir)
 
