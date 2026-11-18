@@ -60,6 +60,7 @@ def extract_morphology_features(df):
     Extracts imaging flow cytometry parameters matching regex pattern:
     .*(Imaging).*|.*Axis.*|.*Mass.*|.*Intensity.*|.*Moment.*|.*Size.*|.*Diffusivity.*|.*Eccentricity.*
     plus FSC/SSC channel parameters.
+    Handles legacy naming conventions and imputes any sporadic missing values.
     """
     pattern = r'.*\(Imaging\).*|.*Axis.*|.*Mass.*|.*Intensity.*|.*Moment.*|.*Size.*|.*Diffusivity.*|.*Eccentricity.*|FSC-|SSC-|CD41-|DNA-'
     morph_cols = [c for c in df.columns if re.search(pattern, c)]
@@ -70,34 +71,62 @@ def extract_morphology_features(df):
 def run_leave_one_animal_out_cv(qc_df, out_dir="output"):
     """
     Executes Leave-One-Animal-Out Cross-Validation across all mice present in the cohort.
+    Backwards-compatible with legacy multi-dataset, multi-plate, and multi-file formats.
     """
     os.makedirs(out_dir, exist_ok=True)
     setup_plot_style()
+    qc_df = qc_df.copy()
 
-    # Identify animals
-    if "mouse" not in qc_df.columns:
-        if "Sample_Plate" in qc_df.columns:
-            qc_df["mouse"] = qc_df["Sample_Plate"].astype(str).str.extract(r'^(M\d+)', expand=False).fillna("Unknown")
+    # Robust animal / group identification with full backward compatibility
+    if "mouse" not in qc_df.columns or qc_df["mouse"].nunique() <= 1:
+        if "Mouse_Plate" in qc_df.columns:
+            extracted = qc_df["Mouse_Plate"].astype(str).str.extract(r'^(?:Mouse|M)?(\d+)', expand=False, flags=re.IGNORECASE)
+            qc_df["mouse"] = extracted.apply(lambda x: f"M{x}" if pd.notna(x) else "Unknown")
+        elif "Sample_Plate" in qc_df.columns and qc_df["Sample_Plate"].astype(str).str.contains(r'^(?:Mouse|M)?\d+', regex=True).any():
+            extracted = qc_df["Sample_Plate"].astype(str).str.extract(r'^(?:Mouse|M)?(\d+)', expand=False, flags=re.IGNORECASE)
+            qc_df["mouse"] = extracted.apply(lambda x: f"M{x}" if pd.notna(x) else "Unknown")
+        elif "dataset_type" in qc_df.columns and qc_df["dataset_type"].nunique() > 1:
+            print("[LOAOCV] Notice: Animal IDs not present. Falling back to legacy dataset grouping (Leave-One-Dataset-Out)...")
+            qc_df["mouse"] = qc_df["dataset_type"]
+        elif "dataset" in qc_df.columns and qc_df["dataset"].nunique() > 1:
+            print("[LOAOCV] Notice: Animal IDs not present. Falling back to legacy dataset grouping (Leave-One-Dataset-Out)...")
+            qc_df["mouse"] = qc_df["dataset"]
+        elif "Sample_Plate" in qc_df.columns and qc_df["Sample_Plate"].nunique() > 1:
+            print("[LOAOCV] Notice: Animal IDs not present. Falling back to plate grouping (Leave-One-Plate-Out)...")
+            qc_df["mouse"] = qc_df["Sample_Plate"]
         else:
-            raise ValueError("No 'mouse' or 'Sample_Plate' column found to identify animals.")
+            raise ValueError("Could not resolve biological replicates (mouse, plate, or dataset) for cross-validation.")
+
+    # Standardize ploidy column if using legacy naming
+    if "Supervised_ploidy" not in qc_df.columns:
+        for c in ["Estimated_Ploidy_D.NA.A", "Supervised_Ploidy_Images", "Supervised_Ploidy", "ploidy"]:
+            if c in qc_df.columns:
+                qc_df["Supervised_ploidy"] = qc_df[c]
+                break
+
+    qc_df["Supervised_ploidy"] = qc_df["Supervised_ploidy"].astype(str).str.strip().str.lower()
+    valid_ploidies = ["2n", "4n", "8n", "16n", "32n"]
+    qc_df = qc_df[qc_df["Supervised_ploidy"].isin(valid_ploidies)].copy()
 
     mice = sorted([m for m in qc_df["mouse"].unique() if m != "Unknown"])
     print("==========================================================================")
     print("      LEAVE-ONE-ANIMAL-OUT CROSS-VALIDATION (LOAOCV) PIPELINE             ")
     print("==========================================================================")
     print(f" Total QC-Passed Cells : {len(qc_df)}")
-    print(f" Unique Animals ({len(mice)})   : {mice}")
+    print(f" Unique Groups ({len(mice)})     : {mice}")
     for m in mice:
         n_m = (qc_df["mouse"] == m).sum()
         ploidies = qc_df.loc[qc_df["mouse"] == m, "Supervised_ploidy"].value_counts().to_dict()
-        print(f"   - Mouse {m:2s}: {n_m:2d} cells | Ploidy distribution: {ploidies}")
+        print(f"   - Group {m:2s}: {n_m:2d} cells | Ploidy distribution: {ploidies}")
     print("==========================================================================")
 
     # Features and Targets
     numeric_morph_cols = extract_morphology_features(qc_df)
     print(f"\nExtracted {len(numeric_morph_cols)} imaging morphology features for modeling.")
 
-    X_all = qc_df[numeric_morph_cols].values
+    # Fill any sparse NaNs with median of available data
+    X_df = qc_df[numeric_morph_cols].fillna(qc_df[numeric_morph_cols].median())
+    X_all = X_df.values
     y_class = qc_df["Supervised_ploidy"].values
 
     ploidy_map = {"2n": 2, "4n": 4, "8n": 8, "16n": 16, "32n": 32}

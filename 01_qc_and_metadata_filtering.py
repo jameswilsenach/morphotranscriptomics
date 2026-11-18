@@ -59,64 +59,84 @@ def normalize_metadata(df, dataset_name="Combined"):
     df["SampleID"] = df["SampleID"].astype(str)
     df.set_index("SampleID", drop=False, inplace=True)
 
-    # Standardize Animal / Mouse column (e.g. M1, M2, M3, M4, M5, M6, M7)
+    # Standardize Animal / Mouse column (e.g. M1, M2, M3, M4, M5, M6, M7 or legacy Mouse1plate1)
     if "mouse" in df.columns and not df["mouse"].isna().all():
         df["mouse"] = df["mouse"].astype(str).str.strip()
+    elif "Mouse_Plate" in df.columns:
+        extracted = df["Mouse_Plate"].astype(str).str.extract(r'^(?:Mouse|M)?(\d+)', expand=False, flags=re.IGNORECASE)
+        df["mouse"] = extracted.apply(lambda x: f"M{x}" if pd.notna(x) else "Unknown")
     elif "Sample_Plate" in df.columns:
-        # Extract mouse ID from plate name (e.g. M1p1 -> M1, M6p2 -> M6)
-        extracted = df["Sample_Plate"].astype(str).str.extract(r'^(M\d+)', expand=False)
-        df["mouse"] = extracted.fillna("Unknown")
+        extracted = df["Sample_Plate"].astype(str).str.extract(r'^(?:Mouse|M)?(\d+)', expand=False, flags=re.IGNORECASE)
+        df["mouse"] = extracted.apply(lambda x: f"M{x}" if pd.notna(x) else "Unknown")
     elif "orig.ident" in df.columns:
-        extracted = df["orig.ident"].astype(str).str.extract(r'^(M\d+)', expand=False)
-        df["mouse"] = extracted.fillna("Unknown")
+        extracted = df["orig.ident"].astype(str).str.extract(r'^(?:Mouse|M)?(\d+)', expand=False, flags=re.IGNORECASE)
+        df["mouse"] = extracted.apply(lambda x: f"M{x}" if pd.notna(x) else "Unknown")
+    elif "SampleID" in df.columns:
+        extracted = df["SampleID"].astype(str).str.extract(r'^(?:10plate_)?(?:Mouse|M)?(\d+)', expand=False, flags=re.IGNORECASE)
+        df["mouse"] = extracted.apply(lambda x: f"M{x}" if pd.notna(x) else "Unknown")
     else:
         df["mouse"] = "Unknown"
 
     df["fold"] = df["mouse"]
 
-    # Standardize Ploidy column
+    # Standardize Ploidy column (handles Supervised_ploidy, Supervised_Ploidy_Images, Estimated_Ploidy_D.NA.A, ploidy)
     if "Supervised_ploidy" not in df.columns:
-        if "Estimated_Ploidy_D.NA.A" in df.columns:
-            df["Supervised_ploidy"] = df["Estimated_Ploidy_D.NA.A"]
-        elif "Supervised_Ploidy_Images" in df.columns:
-            df["Supervised_ploidy"] = df["Supervised_Ploidy_Images"]
-        elif "ploidy" in df.columns:
-            df["Supervised_ploidy"] = df["ploidy"]
-        else:
+        for c in ["Estimated_Ploidy_D.NA.A", "Supervised_Ploidy_Images", "Supervised_Ploidy", "ploidy"]:
+            if c in df.columns:
+                df["Supervised_ploidy"] = df[c]
+                break
+        if "Supervised_ploidy" not in df.columns:
             df["Supervised_ploidy"] = "Unknown"
 
-    df["Supervised_ploidy"] = df["Supervised_ploidy"].astype(str).str.strip()
+    df["Supervised_ploidy"] = df["Supervised_ploidy"].astype(str).str.strip().str.lower()
+    # Normalize ploidy casing to '2n', '4n', etc.
+    valid_map = {"2n": "2n", "4n": "4n", "8n": "8n", "16n": "16n", "32n": "32n", "64n": "64n"}
+    df["Supervised_ploidy"] = df["Supervised_ploidy"].map(lambda x: valid_map.get(x, x))
 
-    # Standardize Contaminated column (Boolean)
-    if "Contaminated" in df.columns:
-        df["Contaminated_bool"] = df["Contaminated"].apply(
+    # Standardize Contaminated column (handles Contaminated, contaminated, Contaminated_bool)
+    contam_col = None
+    for c in ["Contaminated", "contaminated", "Contaminated_bool"]:
+        if c in df.columns:
+            contam_col = c
+            break
+
+    if contam_col is not None:
+        df["Contaminated_bool"] = df[contam_col].apply(
             lambda x: True if str(x).upper() in ["TRUE", "T", "1"] else False
         )
     else:
         df["Contaminated_bool"] = False
 
-    # Standardize control column
-    if "control" in df.columns:
-        df["is_control"] = df["control"].apply(
+    # Standardize control column (handles control, is_control)
+    ctrl_col = "control" if "control" in df.columns else ("is_control" if "is_control" in df.columns else None)
+    if ctrl_col is not None:
+        df["is_control"] = df[ctrl_col].apply(
             lambda x: True if str(x).upper() in ["TRUE", "T", "1"] else False
         )
     else:
         df["is_control"] = False
 
-    # Standardize single cell count
-    if "number_of_cell" in df.columns:
-        df["single_cell"] = df["number_of_cell"].apply(
-            lambda x: True if str(x) in ["1", "1.0"] else False
+    # Standardize single cell count (handles number_of_cell, single_cell)
+    cell_col = "number_of_cell" if "number_of_cell" in df.columns else ("single_cell" if "single_cell" in df.columns else None)
+    if cell_col is not None:
+        df["single_cell"] = df[cell_col].apply(
+            lambda x: True if str(x) in ["1", "1.0", 1, 1.0] else False
         )
     else:
         df["single_cell"] = True
 
-    # Standardize Kallisto read counts & percentage
-    if "kallisto.nb_mapped" not in df.columns and "kallisto_mapped_reads" in df.columns:
-        df["kallisto.nb_mapped"] = df["kallisto_mapped_reads"]
+    # Standardize Kallisto read counts & percentage (handles kallisto.nb_mapped, kallisto_mapped, kallisto_mapped_reads)
+    if "kallisto.nb_mapped" not in df.columns:
+        for c in ["kallisto_mapped", "kallisto_mapped_reads", "kallisto_nb_mapped"]:
+            if c in df.columns:
+                df["kallisto.nb_mapped"] = df[c]
+                break
     
-    if "kallisto.pc_map" not in df.columns and "kallisto_mapping_pc" in df.columns:
-        df["kallisto.pc_map"] = df["kallisto_mapping_pc"]
+    if "kallisto.pc_map" not in df.columns:
+        for c in ["kallisto_mappe_pc", "kallisto_mapping_pc", "kallisto_pc_map"]:
+            if c in df.columns:
+                df["kallisto.pc_map"] = df[c]
+                break
 
     df["kallisto.nb_mapped"] = pd.to_numeric(df.get("kallisto.nb_mapped", np.nan), errors="coerce")
     df["kallisto.pc_map"] = pd.to_numeric(df.get("kallisto.pc_map", np.nan), errors="coerce")
