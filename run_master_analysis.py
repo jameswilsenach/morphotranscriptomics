@@ -4,21 +4,22 @@ run_master_analysis.py
 Master orchestration script for the Single Cell Morphotranscriptomics Project handover.
 
 Runs the complete pipeline end-to-end or individual analysis stages cleanly via CLI:
-  Step 1: 01_qc_and_metadata_filtering.py     (Quality Control & Train/Pilot metadata harmonization)
+  Step 1: 01_qc_and_metadata_filtering.py     (Quality Control & Multi-Animal metadata harmonization)
   Step 2: 02_gene_expression_rankings.py     (Vectorized gene expression lookup & FCS/CVW mapping)
   Step 3: 03_dimensionality_reduction.py     (Scanpy/AnnData HVG selection, PCA, & UMAP embedding)
   Step 4: 04_mofa_multimodal_analysis.py     (Multi-Omics Factor Analysis integration)
   Step 5: 05_pathway_enrichment.py           (Pathway enrichment dotplots & WordCloud visualization)
+  Step CV: leave_one_animal_out_cv.py        (Leave-One-Animal-Out Cross-Validation across all mice)
 
 Usage Examples:
-    # Run full pipeline end-to-end:
-    python run_master_analysis.py --train_dir "D:\\Morphotranscriptomic_Data" --test_dir "exp" --out_dir "output" --gene kalrn
+    # Run Leave-One-Animal-Out Cross-Validation:
+    python run_master_analysis.py --step cv
+
+    # Run full pipeline end-to-end including LOAOCV:
+    python run_master_analysis.py --loaocv --out_dir "output"
 
     # Run specific step (e.g. Step 1 QC filtering only):
     python run_master_analysis.py --step 1
-
-    # Run for a different marker gene (e.g. pf4):
-    python run_master_analysis.py --gene pf4
 """
 
 import argparse
@@ -49,11 +50,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
+    parser.add_argument("--metadata_file", type=str, default=r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\Metadata_merged_YL_SF_20.10.26_v2.csv", help="Path to unified multi-animal metadata CSV")
     parser.add_argument("--train_dir", type=str, default=r"D:\Morphotranscriptomic_Data", help="Path to main Train dataset directory")
     parser.add_argument("--test_dir", type=str, default="exp", help="Path to local Test/Pilot expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save generated CSVs and figures")
     parser.add_argument("--gene", type=str, default="kalrn", help="Target gene symbol for expression rankings (default: kalrn)")
-    parser.add_argument("--step", type=str, default="all", choices=["all", "1", "2", "3", "4", "5"], help="Specific step to run or 'all'")
+    parser.add_argument("--step", type=str, default="all", choices=["all", "1", "2", "3", "4", "5", "cv"], help="Specific step to run, 'cv' for LOAOCV, or 'all'")
+    parser.add_argument("--loaocv", action="store_true", help="Enable Leave-One-Animal-Out Cross-Validation stage")
     parser.add_argument(
         "--rna_likelihood",
         type=str,
@@ -78,11 +81,13 @@ def main():
     print("      SINGLE CELL MORPHOTRANSCRIPTOMICS MASTER ANALYSIS RUNNER           ")
     print("==========================================================================")
     print(f" Python Executable : {python_exe}")
+    print(f" Metadata File     : {os.path.abspath(args.metadata_file) if args.metadata_file else 'Default'}")
     print(f" Train Directory   : {os.path.abspath(args.train_dir)}")
     print(f" Test Directory    : {os.path.abspath(args.test_dir)}")
     print(f" Output Directory  : {os.path.abspath(args.out_dir)}")
     print(f" Target Gene       : {args.gene}")
     print(f" Target Step       : {args.step}")
+    print(f" LOAOCV Enabled    : {args.loaocv or args.step == 'cv'}")
     print("==========================================================================")
 
     exp_train_dir = os.path.join(args.train_dir, "expression")
@@ -94,6 +99,7 @@ def main():
         print("\n>>> STEP 1: Quality Control & Metadata Harmonization")
         cmd = [
             python_exe, "01_qc_and_metadata_filtering.py",
+            "--metadata_file", args.metadata_file,
             "--train_dir", args.train_dir,
             "--test_dir", args.test_dir,
             "--out_dir", args.out_dir
@@ -139,6 +145,17 @@ def main():
         cmd = [
             python_exe, "05_pathway_enrichment.py",
             "--gene_list", f"{args.gene.upper()},PF4,RUNX1,ITGA2B,MPL,FLI1,GATA1,NFE2",
+            "--out_dir", args.out_dir
+        ]
+        run_command(cmd)
+
+    # Step CV: Leave-One-Animal-Out Cross-Validation (LOAOCV)
+    if args.step in ["all", "cv"] or args.loaocv:
+        print("\n>>> STEP CV: Leave-One-Animal-Out Cross-Validation (LOAOCV)")
+        cmd = [
+            python_exe, "leave_one_animal_out_cv.py",
+            "--metadata_file", args.metadata_file,
+            "--qc_meta", os.path.join(args.out_dir, "qc_filtered_metadata.csv"),
             "--out_dir", args.out_dir
         ]
         run_command(cmd)
