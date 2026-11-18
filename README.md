@@ -136,8 +136,10 @@ Exploration_Data/
 **Script**: [`03_dimensionality_reduction.py`](file:///c:/Users/vilsn/Dropbox/Work/Turing/Exploration_Data/03_dimensionality_reduction.py)
 
 - **What it does for the biologist**: Selects the top 2,000 Highly Variable Genes (HVGs), scales expression data, performs Principal Component Analysis (PCA), and projects cells onto a 2D UMAP manifold.
+- **Cell Cycle Options**: Supports `--cell_cycle_mode` (`none` [default], `filter`, `regress`). When scored or regressed, outputs cell cycle phase breakdown and dedicated UMAP coloring (`output/03_umap_cell_cycle_phase.png`).
 - **Outputs**:
   - `output/03_umap_supervised_ploidy.png`: UMAP plot where cells are colored by genome ploidy ($2\text{n}, 4\text{n}, 8\text{n}, 16\text{n}, 32\text{n}$).
+  - `output/03_umap_cell_cycle_phase.png`: UMAP plot colored by assigned cell cycle phase (G1, S, G2/M).
   - `output/03_umap_dataset_cohort.png`: UMAP plot comparing Train vs. Pilot cohorts.
   - `output/03_umap_gene_kalrn.png`: Expression gradient overlay on the UMAP landscape.
 
@@ -185,8 +187,25 @@ You can run the entire pipeline end-to-end or individual steps using **`run_mast
 # Activate environment
 conda activate sc-analysis
 
-# Run FULL pipeline end-to-end for default gene 'kalrn'
+# Run FULL pipeline end-to-end (baseline without cell cycle alteration, matching original notebook)
 python run_master_analysis.py --train_dir "D:\Morphotranscriptomic_Data" --test_dir "exp" --out_dir "output" --gene kalrn
+
+# Run with cell cycle genes filtered across ALL analyses:
+python run_master_analysis.py --cell_cycle_mode filter --out_dir "output_cc_filtered"
+
+# Run with cell cycle regression across ALL analyses:
+python run_master_analysis.py --cell_cycle_mode regress --out_dir "output_cc_regressed"
+
+# Run cell cycle handling for JUST ONE analysis (e.g. Step 3 PCA/UMAP only):
+python run_master_analysis.py --step 3 --cell_cycle_mode regress
+# or targeting specific step in full pipeline:
+python run_master_analysis.py --cell_cycle_mode regress --cell_cycle_steps 3
+
+# Run individual scripts directly with cell cycle options:
+python 03_dimensionality_reduction.py --cell_cycle_mode regress
+python 04_mofa_multimodal_analysis.py --cell_cycle_mode filter
+python 04b_mvae_multimodal_analysis.py --cell_cycle_mode filter
+python 02_gene_expression_rankings.py --cell_cycle_mode filter
 
 # Run only Step 1 (Quality Control):
 python run_master_analysis.py --step 1
@@ -194,8 +213,10 @@ python run_master_analysis.py --step 1
 # Run gene expression ranking for a different gene (e.g. pf4):
 python run_master_analysis.py --gene pf4
 
-# Run PyTorch MVAE Deep Learning training:
-python 04b_mvae_multimodal_analysis.py --epochs 100 --latent_dim 10 --out_dir "output"
+# Run Leave-One-Animal-Out Cross-Validation:
+python run_master_analysis.py --step cv
+# or standalone:
+python leave_one_animal_out_cv.py
 ```
 
 ---

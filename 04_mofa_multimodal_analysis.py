@@ -165,7 +165,8 @@ def prepare_mofa_input_matrices(
     rna_likelihood="poisson",
     morph_likelihood="gaussian",
     rna_norm="raw_counts",
-    log_morph=False
+    log_morph=False,
+    cell_cycle_mode="none"
 ):
     """
     Ingests and normalizes RNA expression and Morphology data for common QC-passed cells
@@ -175,6 +176,8 @@ def prepare_mofa_input_matrices(
 
     if not os.path.exists(exp_dir) and os.path.exists("exp"):
         exp_dir = "exp"
+    elif not os.path.exists(exp_dir) and os.path.exists(r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"):
+        exp_dir = r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"
 
     adata = sc.read_10x_mtx(exp_dir)
     adata.var_names_make_unique()
@@ -183,6 +186,19 @@ def prepare_mofa_input_matrices(
     is_ribo = adata.var_names.str.startswith(('Rps', 'Rpl'))
     is_unnamed = adata.var_names.str.startswith('Unnamed')
     adata = adata[:, ~(is_ribo | is_unnamed)].copy()
+
+    # Optional cell cycle handling
+    from cell_cycle import filter_cell_cycle_genes, regress_cell_cycle_df
+    if cell_cycle_mode == "filter":
+        print("[Cell Cycle] MOFA2 RNA View: Filtering out canonical cell cycle genes.")
+        cc_mask = filter_cell_cycle_genes(adata.var_names)
+        adata = adata[:, cc_mask].copy()
+    elif cell_cycle_mode == "regress":
+        print("[Cell Cycle] MOFA2 RNA View: Regressing out cell cycle scores.")
+    elif cell_cycle_mode == "none":
+        print("[Cell Cycle] MOFA2 RNA View: Retained all cell cycle genes (baseline).")
+    else:
+        raise ValueError(f"Invalid cell_cycle_mode: {cell_cycle_mode}")
 
     df_raw = adata.to_df()
 
@@ -211,11 +227,16 @@ def prepare_mofa_input_matrices(
     # then extract the corresponding genes from the raw count matrix
     lib_sizes = df_raw.clip(lower=0).sum(axis=1).replace(0, 1.0)
     df_log_norm = np.log1p(df_raw.clip(lower=0).div(lib_sizes, axis=0) * 1e4)
+    if cell_cycle_mode == "regress":
+        df_log_norm = regress_cell_cycle_df(df_log_norm)
     gene_vars = df_log_norm.var(axis=0)
     # Only keep genes expressed in at least 1 cell with non-zero variance
     active_genes = gene_vars[gene_vars > 0]
     top_genes = active_genes.nlargest(min(n_hvg, len(active_genes))).index
-    df_rna_hvg = df_raw[top_genes]
+    if cell_cycle_mode == "regress" and rna_likelihood == "gaussian":
+        df_rna_hvg = df_log_norm[top_genes]
+    else:
+        df_rna_hvg = df_raw[top_genes]
 
     img_df = extract_morphology_features(meta_df)
 
@@ -383,10 +404,17 @@ def main():
         action="store_true",
         help="Reuse existing HDF5 model file if present instead of retraining"
     )
+    parser.add_argument(
+        "--cell_cycle_mode",
+        type=str,
+        default="none",
+        choices=["none", "filter", "regress"],
+        help="Cell cycle handling strategy: 'none' (default, original notebook baseline), 'filter' (drop CC genes), 'regress' (regress out CC scores)"
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 04: MULTI-OMICS FACTOR ANALYSIS (MOFA2) ===")
+    print(f"=== STEP 04: MULTI-OMICS FACTOR ANALYSIS (MOFA2) [Cell Cycle: {args.cell_cycle_mode}] ===")
 
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
     proc_rna, proc_img, ploidy_series = prepare_mofa_input_matrices(
@@ -396,7 +424,8 @@ def main():
         rna_likelihood=args.rna_likelihood,
         morph_likelihood=args.morph_likelihood,
         rna_norm=args.rna_norm,
-        log_morph=args.log_morph
+        log_morph=args.log_morph,
+        cell_cycle_mode=args.cell_cycle_mode
     )
 
     model_hdf5 = "mofa_model_rna_morphology.hdf5"

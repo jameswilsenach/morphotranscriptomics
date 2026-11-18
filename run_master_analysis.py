@@ -71,11 +71,30 @@ def main():
         choices=["raw_counts", "size_factor_counts"],
         help="Count normalization strategy for Poisson RNA likelihood in Step 4 (default: raw_counts)"
     )
+    parser.add_argument(
+        "--cell_cycle_mode",
+        type=str,
+        default="none",
+        choices=["none", "filter", "regress"],
+        help="Cell cycle handling strategy: 'none' (default, original notebook baseline), 'filter' (drop CC genes), 'regress' (regress out CC scores)"
+    )
+    parser.add_argument(
+        "--cell_cycle_steps",
+        type=str,
+        default="all",
+        help="Analyses to apply cell cycle handling: 'all' (default) or comma-separated steps (e.g. '3', '4', '3,4')"
+    )
 
     args = parser.parse_args()
 
     python_exe = sys.executable
     os.makedirs(args.out_dir, exist_ok=True)
+
+    # Determine which steps have cell cycle handling enabled
+    if args.cell_cycle_steps.lower() in ["all", "*"]:
+        cc_active_steps = {"2", "3", "4", "4b"}
+    else:
+        cc_active_steps = {s.strip().lower() for s in args.cell_cycle_steps.split(",")}
 
     print("==========================================================================")
     print("      SINGLE CELL MORPHOTRANSCRIPTOMICS MASTER ANALYSIS RUNNER           ")
@@ -88,11 +107,15 @@ def main():
     print(f" Target Gene       : {args.gene}")
     print(f" Target Step       : {args.step}")
     print(f" LOAOCV Enabled    : {args.loaocv or args.step == 'cv'}")
+    print(f" Cell Cycle Mode   : {args.cell_cycle_mode} (active for steps: {', '.join(sorted(cc_active_steps))})")
     print("==========================================================================")
 
     exp_train_dir = os.path.join(args.train_dir, "expression")
     if not os.path.exists(exp_train_dir):
-        exp_train_dir = args.test_dir
+        if os.path.exists(args.test_dir):
+            exp_train_dir = args.test_dir
+        elif os.path.exists(r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"):
+            exp_train_dir = r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"
 
     # Step 1: Quality Control & Metadata Harmonization
     if args.step in ["all", "1"]:
@@ -108,34 +131,40 @@ def main():
 
     # Step 2: Gene Expression Rankings & FCS/CVW Cell Mapping
     if args.step in ["all", "2"]:
-        print(f"\n>>> STEP 2: Gene Expression Rankings & FCS/CVW Mapping for '{args.gene}'")
+        step2_cc = args.cell_cycle_mode if ("2" in cc_active_steps and args.cell_cycle_mode in ["none", "filter"]) else "none"
+        print(f"\n>>> STEP 2: Gene Expression Rankings & FCS/CVW Mapping for '{args.gene}' [Cell Cycle: {step2_cc}]")
         cmd = [
             python_exe, "02_gene_expression_rankings.py",
             "--gene", args.gene,
             "--exp_dir", exp_train_dir,
-            "--out_dir", args.out_dir
+            "--out_dir", args.out_dir,
+            "--cell_cycle_mode", step2_cc
         ]
         run_command(cmd)
 
     # Step 3: Dimensionality Reduction (PCA & UMAP)
     if args.step in ["all", "3"]:
-        print("\n>>> STEP 3: Dimensionality Reduction (Scanpy PCA & UMAP)")
+        step3_cc = args.cell_cycle_mode if "3" in cc_active_steps else "none"
+        print(f"\n>>> STEP 3: Dimensionality Reduction (Scanpy PCA & UMAP) [Cell Cycle: {step3_cc}]")
         cmd = [
             python_exe, "03_dimensionality_reduction.py",
             "--exp_dir", exp_train_dir,
-            "--out_dir", args.out_dir
+            "--out_dir", args.out_dir,
+            "--cell_cycle_mode", step3_cc
         ]
         run_command(cmd)
 
     # Step 4: Multi-Omics Factor Analysis (MOFA) Integration
     if args.step in ["all", "4"]:
-        print(f"\n>>> STEP 4: Multi-Omics Factor Analysis (MOFA2 Integration, RNA likelihood='{args.rna_likelihood}')")
+        step4_cc = args.cell_cycle_mode if "4" in cc_active_steps else "none"
+        print(f"\n>>> STEP 4: Multi-Omics Factor Analysis (MOFA2, RNA likelihood='{args.rna_likelihood}') [Cell Cycle: {step4_cc}]")
         cmd = [
             python_exe, "04_mofa_multimodal_analysis.py",
             "--exp_dir", exp_train_dir,
             "--out_dir", args.out_dir,
             "--rna_likelihood", args.rna_likelihood,
-            "--rna_norm", args.rna_norm
+            "--rna_norm", args.rna_norm,
+            "--cell_cycle_mode", step4_cc
         ]
         run_command(cmd)
 

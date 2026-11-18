@@ -36,10 +36,12 @@ def setup_plot_style():
 def load_10x_expression_data(exp_dir):
     """
     Loads 10x expression matrix, cell barcodes, and gene feature annotations.
-    Prefers D:\\Morphotranscriptomic_Data\\expression if available, falling back to exp/.
+    Prefers D:\\Morphotranscriptomic_Data\\expression if available, falling back to exp/ or Dropbox.
     """
     if not os.path.exists(exp_dir) and os.path.exists("exp"):
         exp_dir = "exp"
+    elif not os.path.exists(exp_dir) and os.path.exists(r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"):
+        exp_dir = r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"
     
     print(f"Loading 10x matrix from: {os.path.abspath(exp_dir)}")
 
@@ -73,12 +75,13 @@ def load_10x_expression_data(exp_dir):
     return matrix, features_df, barcodes
 
 
-def filter_genes(features_df, matrix):
+def filter_genes(features_df, matrix, cell_cycle_mode="none"):
     """
     Applies morphotrans2 gene filtering logic:
     - Excludes mitochondrial genes starting with 'mt-'
     - Excludes ribosomal genes starting with ('Rps', 'Rpl')
     - Excludes genes starting with 'Unnamed'
+    - Optionally excludes canonical cell cycle genes if cell_cycle_mode == 'filter'
     """
     symbols = features_df["gene_symbol"].astype(str)
     
@@ -88,6 +91,15 @@ def filter_genes(features_df, matrix):
 
     # morphotrans2 notebook rule: genes_to_keep = ~(is_ribo | is_unnamed)
     genes_to_keep = ~(is_ribo | is_unnamed)
+
+    if cell_cycle_mode == "filter":
+        from cell_cycle import filter_cell_cycle_genes
+        cc_mask = filter_cell_cycle_genes(symbols)
+        genes_to_keep = genes_to_keep & cc_mask
+        print(f"[Cell Cycle] Filtered out cell cycle genes from ranking pool.")
+    elif cell_cycle_mode == "none":
+        print("[Cell Cycle] Mode 'none': Retained all cell cycle genes (baseline).")
+
     keep_indices = np.where(genes_to_keep)[0]
 
     filtered_features = features_df.iloc[keep_indices].reset_index(drop=True)
@@ -242,16 +254,23 @@ def main():
     parser.add_argument("--n", type=int, default=10, help="Number of top and bottom cells to select")
     parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
+    parser.add_argument(
+        "--cell_cycle_mode",
+        type=str,
+        default="none",
+        choices=["none", "filter"],
+        help="Cell cycle handling strategy: 'none' (default, original notebook baseline), 'filter' (exclude CC genes)"
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 02: GENE EXPRESSION RANKINGS & CELL MAPPING ===")
+    print(f"=== STEP 02: GENE EXPRESSION RANKINGS & CELL MAPPING [Cell Cycle: {args.cell_cycle_mode}] ===")
 
     # Load 10x matrix data
     matrix, features_df, barcodes = load_10x_expression_data(args.exp_dir)
 
     # Filter genes matching morphotrans2 rules
-    matrix, features_df, _ = filter_genes(features_df, matrix)
+    matrix, features_df, _ = filter_genes(features_df, matrix, cell_cycle_mode=args.cell_cycle_mode)
 
     # Check for QC metadata from Step 01
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
