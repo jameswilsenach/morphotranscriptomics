@@ -54,6 +54,20 @@ def main():
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save generated CSVs and figures")
     parser.add_argument("--gene", type=str, default="kalrn", help="Target gene symbol for expression rankings (default: kalrn)")
     parser.add_argument("--step", type=str, default="all", choices=["all", "1", "2", "3", "4", "5"], help="Specific step to run or 'all'")
+    parser.add_argument(
+        "--rna_likelihood",
+        type=str,
+        default="poisson",
+        choices=["poisson", "bernoulli", "gaussian"],
+        help="MOFA2 likelihood for RNA view in Step 4 (default: poisson)"
+    )
+    parser.add_argument(
+        "--rna_norm",
+        type=str,
+        default="raw_counts",
+        choices=["raw_counts", "size_factor_counts"],
+        help="Count normalization strategy for Poisson RNA likelihood in Step 4 (default: raw_counts)"
+    )
 
     args = parser.parse_args()
 
@@ -109,11 +123,13 @@ def main():
 
     # Step 4: Multi-Omics Factor Analysis (MOFA) Integration
     if args.step in ["all", "4"]:
-        print("\n>>> STEP 4: Multi-Omics Factor Analysis (MOFA Integration)")
+        print(f"\n>>> STEP 4: Multi-Omics Factor Analysis (MOFA2 Integration, RNA likelihood='{args.rna_likelihood}')")
         cmd = [
             python_exe, "04_mofa_multimodal_analysis.py",
             "--exp_dir", exp_train_dir,
-            "--out_dir", args.out_dir
+            "--out_dir", args.out_dir,
+            "--rna_likelihood", args.rna_likelihood,
+            "--rna_norm", args.rna_norm
         ]
         run_command(cmd)
 
