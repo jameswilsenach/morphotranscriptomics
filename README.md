@@ -90,6 +90,7 @@ Exploration_Data/
 ├── 04_mofa_multimodal_analysis.py          # Step 4: Multi-Omics Factor Analysis (MOFA)
 ├── 04b_mvae_multimodal_analysis.py         # Step 4b: PyTorch Multimodal VAE (MVAE)
 ├── 05_pathway_enrichment.py                # Step 5: Pathway enrichment (gseapy) & WordCloud
+├── 06_morphology_gene_correlations.py      # Step 6: Spearman morphology-to-gene correlations & scatter grids
 └── run_master_analysis.py                  # Master CLI Pipeline Runner
 ```
 
@@ -174,6 +175,18 @@ Exploration_Data/
 - **Outputs**:
   - `output/05_pathway_enrichment_dotplot.png`: Pathway enrichment dotplot.
   - `output/05_pathway_wordcloud.png`: Biological pathway WordCloud visualization.
+
+---
+
+### Step 6: Morphology-to-Gene Spearman Rank Correlations
+**Script**: [`06_morphology_gene_correlations.py`](file:///c:/Users/vilsn/Documents/morphotranscriptomics-morph-gene-corr/06_morphology_gene_correlations.py)
+
+- **What it does for the biologist**: Computes robust pairwise **Spearman rank correlations ($\rho$)**, Benjamini–Hochberg FDR ($q$-values), and partial Spearman correlations controlling for $\log_2(\text{Ploidy})$ between all expressed genes and imaging flow cytometry morphology parameters across all 393 QC-passed cells (M1–M7), while remaining backwards-compatible with legacy single-cohort datasets (`--legacy_split` or `--cohort 10plate` / `--cohort 4plate`).
+- **Outputs**:
+  - `output/06_top_gene_morphology_spearman_scatter_grid.png`: 12-panel scatter & regression grid of top positively/negatively correlated gene–morphology pairs colored by `Supervised_ploidy`.
+  - `output/06_gene_morphology_spearman_ranking_labeled.png`: Two-panel volcano & ranked bar chart labeling genes with particularly high Spearman $|\rho|$ and key megakaryocyte markers (`Ppbp`, `Pde3a`, `Mylk`, `Kalrn`, `Rock1`, `Exoc6`, `Pf4`, `Itga2b`).
+  - `output/06_morphology_gene_spearman_heatmap.png`: Hierarchically clustered Spearman correlation matrix across top genes and morphology features.
+  - `output/morphology_gene_spearman_top_pairs.csv` & `output/morphology_gene_spearman_per_gene_summary.csv`: Full tabular correlation statistics.
 
 ---
 
