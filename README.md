@@ -27,8 +27,8 @@ The analysis operates on a unified multi-animal cohort (`Metadata_merged_YL_SF_2
   - `Supervised_ploidy`: Retains valid ploidy classes ($2\text{n}, 4\text{n}, 8\text{n}, 16\text{n}, 32\text{n}$) while excluding $64\text{n}$ (due to low cell counts) and unassigned artifacts.
   - `control == 0`: Excludes empty control wells.
   - `number_of_cell == 1`: Verifies single-cell sorting per well.
-  - `kallisto.pc_map > 50.0%`: Requires $>50\%$ read alignment rate.
-  - `kallisto.nb_mapped > 20,000`: Requires $>20,000$ mapped reads per cell.
+  - `kallisto.pc_map > 50.0%`: Requires $>50\%$ read alignment rate (refinable via `--min_map_pc`).
+  - `kallisto.nb_mapped > 20,000`: Requires $>20,000$ mapped reads per cell (refinable via `--min_mapped_reads`).
 
 ### 2. QC-Passed Cell Yield by Animal
 | Animal | Plate IDs | Total Wells | QC-Passed Cells | Ploidy Distribution Breakdown |
@@ -91,6 +91,8 @@ Exploration_Data/
 ├── 04b_mvae_multimodal_analysis.py         # Step 4b: PyTorch Multimodal VAE (MVAE)
 ├── 05_pathway_enrichment.py                # Step 5: Pathway enrichment (gseapy) & WordCloud
 ├── 06_morphology_gene_correlations.py      # Step 6: Spearman morphology-to-gene correlations & scatter grids
+├── cell_cycle.py                           # Shared cited cell-cycle & custom gene exclusion utilities
+├── hvg_utils.py                            # Shared gene prevalence (--min_cells_per_gene) & HVG selection utilities
 └── run_master_analysis.py                  # Master CLI Pipeline Runner
 ```
 
@@ -136,7 +138,7 @@ Exploration_Data/
 ### Step 3: Dimensionality Reduction (PCA & UMAP)
 **Script**: [`03_dimensionality_reduction.py`](file:///c:/Users/vilsn/Dropbox/Work/Turing/Exploration_Data/03_dimensionality_reduction.py)
 
-- **What it does for the biologist**: Selects the top 2,000 Highly Variable Genes (HVGs), scales expression data, performs Principal Component Analysis (PCA), and projects cells onto a 2D UMAP manifold.
+- **What it does for the biologist**: Selects Highly Variable Genes (HVGs, default top 2,000; refinable via `--n_hvg`, `--hvg_method`, and `--min_cells_per_gene`), scales expression data, performs Principal Component Analysis (PCA), and projects cells onto a 2D UMAP manifold.
 - **Optional Gene Filtering (No Phase Inference)**: Supports `--exclude_cell_cycle` (drops the cited 97-gene Tirosh et al. 2016 / Seurat `cc.genes.updated.2019` set + legacy aliases), `--exclude_genes_file` (drops any user-supplied `.txt`/`.csv`/`.tsv` list, e.g. Mouse `GO:0007049`), and `--exclude_genes` (comma-separated symbols). Every excluded gene and its citation is recorded in `output/03_excluded_genes_audit.csv`. Discrete G1/S/G2M phase classification and regression are intentionally omitted because megakaryocytes undergo endomitosis rather than canonical diploid mitosis (Luecken & Theis, 2019).
 - **Outputs**:
   - `output/03_umap_supervised_ploidy.png`: UMAP plot where cells are colored by genome ploidy ($2\text{n}, 4\text{n}, 8\text{n}, 16\text{n}, 32\text{n}$).
@@ -232,6 +234,12 @@ conda activate sc-analysis
 
 # Run FULL pipeline end-to-end (baseline without gene exclusions, matching original notebook)
 python run_master_analysis.py --train_dir "D:\Morphotranscriptomic_Data" --test_dir "exp" --out_dir "output" --gene kalrn
+
+# Refine read-count QC, gene prevalence, and HVG selection criteria end-to-end:
+#   --min_mapped_reads (default: 20000), --min_map_pc (default: 50.0),
+#   --min_cells_per_gene (default: 0), --n_hvg (default: 2000),
+#   --hvg_method: default | raw_var | log1p_var | seurat | seurat_v3
+python run_master_analysis.py --min_mapped_reads 50000 --min_map_pc 60.0 --min_cells_per_gene 5 --n_hvg 3000 --hvg_method seurat --out_dir "output_refined"
 
 # Exclude cited cell cycle genes (Tirosh et al. 2016 / Seurat cc.genes.updated.2019) across ALL analyses:
 python run_master_analysis.py --exclude_cell_cycle --out_dir "output_no_cc"
