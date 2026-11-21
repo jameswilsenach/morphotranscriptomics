@@ -1,5 +1,5 @@
 """
-06_morphology_gene_correlations.py
+04_morphology_gene_correlations.py
 ----------------------------------
 Computes robust pairwise Spearman rank correlations between single-cell gene expression
 and imaging flow cytometry morphology parameters across megakaryocyte polyploidization states
@@ -7,11 +7,11 @@ and imaging flow cytometry morphology parameters across megakaryocyte polyploidi
 
 Features:
 1. Backwards-Compatible & Multi-Cohort Data Ingestion:
-   - Supports the unified multi-animal metadata file (Metadata_merged_YL_SF_20.10.26_v2.csv,
+   - Supports the unified multi-animal metadata file (data/Metadata_merged_YL_SF_20.10.26_v2.csv,
      393 QC-passed cells across Mice M1-M7: 291 in 10plate M1-M5 + 102 in 4plate M6-M7).
-   - Fully backwards compatible with legacy train/pilot datasets (D:\\Morphotranscriptomic_Data,
-     exp/, meta.v1+flowSF.csv, Metadata_flow+well_id+supervised_ploidy.csv, meta.contaminant.2.tsv,
-     and pre-saved mofa_model_rna_morphology.hdf5).
+   - Fully backwards compatible with legacy train/pilot datasets (data/expression, data/exp,
+     data/meta.v1+flowSF.csv, Metadata_flow+well_id+supervised_ploidy.csv, meta.contaminant.2.tsv,
+     and pre-saved data/mofa_model_rna_morphology.hdf5).
    - Matches cell identifiers automatically across SampleID, Well_ID, Well, Barcode, and X.
 2. Robust Spearman Correlation & Statistical Testing:
    - Computes pairwise Spearman rank correlation (rho), two-sided t-distribution p-values,
@@ -20,21 +20,21 @@ Features:
      ploidy-driven scaling from ploidy-independent morphotranscriptomic coupling.
    - Evaluates within-cohort consistency (10plate M1-M5 vs 4plate M6-M7) when multiple cohorts exist.
 3. Publication-Grade Visualizations:
-   - 06_top_gene_morphology_spearman_scatter_grid.png:
+   - 04_top_gene_morphology_spearman_scatter_grid.png:
      Multi-panel scatter & regression grid of top correlated gene-morphology pairs colored by
      Supervised Ploidy, labeling extreme cells and displaying Spearman rho & FDR q-values.
-   - 06_gene_morphology_spearman_ranking_labeled.png:
+   - 04_gene_morphology_spearman_ranking_labeled.png:
      Two-panel summary (Volcano plot + Top Ranked Gene Lollipop/Bar chart) explicitly labeling
      genes with particularly high Spearman correlation and their associated morphology features.
-   - 06_morphology_gene_spearman_heatmap.png:
+   - 04_morphology_gene_spearman_heatmap.png:
      Clustered Spearman correlation heatmap of top correlated genes vs imaging morphology features.
 
 Usage:
     # Run on default unified multi-animal dataset (or automatic fallback to available datasets):
-    python 06_morphology_gene_correlations.py --out_dir "output"
+    python 04_morphology_gene_correlations.py --out_dir "output"
 
     # Run on a specific legacy dataset directory / metadata file:
-    python 06_morphology_gene_correlations.py --metadata_file "meta.v1+flowSF.csv" --exp_dir "exp" --out_dir "output_legacy"
+    python 04_morphology_gene_correlations.py --metadata_file "data/meta.v1+flowSF.csv" --exp_dir "data/exp" --out_dir "output_legacy"
 """
 
 import os
@@ -64,9 +64,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-DEFAULT_EXPLORATION_DIR = r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data"
-DEFAULT_UNIFIED_META = os.path.join(DEFAULT_EXPLORATION_DIR, "Metadata_merged_YL_SF_20.10.26_v2.csv")
-DEFAULT_TRAIN_DIR = r"D:\Morphotranscriptomic_Data"
+DEFAULT_DATA_DIR = "data"
+DEFAULT_UNIFIED_META = os.path.join(DEFAULT_DATA_DIR, "Metadata_merged_YL_SF_20.10.26_v2.csv")
+DEFAULT_TRAIN_DIR = DEFAULT_DATA_DIR
 
 PLOIDY_ORDER = ["2n", "4n", "8n", "16n", "32n"]
 PLOIDY_PALETTE = {
@@ -195,7 +195,15 @@ def load_qc_metadata_backwards_compatible(
     from importlib import import_module
     qc_mod = import_module("01_qc_and_metadata_filtering")
 
-    if qc_meta_path and os.path.exists(qc_meta_path) and metadata_file is None:
+    if metadata_file is None:
+        if not (qc_meta_path and os.path.exists(qc_meta_path)):
+            out_dir_hint = os.path.dirname(qc_meta_path) or "output"
+            raise FileNotFoundError(
+                f"Missing prerequisite output from Step 1 (QC): '{qc_meta_path}'.\n"
+                f"Please run Step 1 first:\n"
+                f"  python run_master_analysis.py --step qc --out_dir \"{out_dir_hint}\"\n"
+                f"(Or pass --metadata_file explicitly to run standalone QC on a raw metadata CSV.)"
+            )
         print(f"[Metadata] Loading pre-filtered QC metadata from: {os.path.abspath(qc_meta_path)}")
         qc_df = pd.read_csv(qc_meta_path, index_col=0)
         if "SampleID" not in qc_df.columns:
@@ -351,9 +359,8 @@ def load_expression_backwards_compatible(
         candidate_dirs.append(pilot_exp_dir)
     candidate_dirs.extend([
         os.path.join(DEFAULT_TRAIN_DIR, "expression"),
+        os.path.join(DEFAULT_DATA_DIR, "exp"),
         "exp",
-        os.path.join(DEFAULT_EXPLORATION_DIR, "exp"),
-        r"C:\Users\vilsn\Dropbox\Work\Turing\RNA_Analysis\gene_exp.plate1-4",
     ])
 
     seen_abs_dirs = set()
@@ -385,8 +392,9 @@ def load_expression_backwards_compatible(
         if mofa_hdf5_path:
             h5_candidates.append(mofa_hdf5_path)
         h5_candidates.extend([
+            os.path.join(DEFAULT_DATA_DIR, "mofa_model_rna_morphology.hdf5"),
+            os.path.join("output", "mofa_model_rna_morphology.hdf5"),
             "mofa_model_rna_morphology.hdf5",
-            os.path.join(DEFAULT_EXPLORATION_DIR, "mofa_model_rna_morphology.hdf5")
         ])
         for h5_p in h5_candidates:
             if h5_p and os.path.exists(h5_p):
@@ -839,7 +847,7 @@ def plot_top_correlated_scatter_grid(
     )
     plt.tight_layout(rect=[0, 0, 1, 0.97])
 
-    out_path = os.path.join(out_dir, "06_top_gene_morphology_spearman_scatter_grid.png")
+    out_path = os.path.join(out_dir, "04_top_gene_morphology_spearman_scatter_grid.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
     print(f"[Plotting] Saved Top Correlated Gene-Morphology Scatter Grid to: {os.path.abspath(out_path)}")
@@ -1017,7 +1025,7 @@ def plot_labeled_high_correlation_genes(gene_summary_df, out_dir, top_n_label=25
     ax_bar.set_xlabel("Spearman Rank Correlation (ρ) [Green = Positive, Red = Negative]", fontsize=10.5)
 
     plt.tight_layout()
-    out_path = os.path.join(out_dir, "06_gene_morphology_spearman_ranking_labeled.png")
+    out_path = os.path.join(out_dir, "04_gene_morphology_spearman_ranking_labeled.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
     print(f"[Plotting] Saved Labeled High-Correlation Gene Ranking Figure to: {os.path.abspath(out_path)}")
@@ -1102,7 +1110,7 @@ def plot_morphology_gene_heatmap(rho_df, fdr_df, gene_summary_df, out_dir, n_top
     plt.yticks(rotation=0, fontsize=8.5)
 
     plt.tight_layout()
-    out_path = os.path.join(out_dir, "06_morphology_gene_spearman_heatmap.png")
+    out_path = os.path.join(out_dir, "04_morphology_gene_spearman_heatmap.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
     print(f"[Plotting] Saved Morphology-Gene Spearman Correlation Heatmap to: {os.path.abspath(out_path)}")
@@ -1111,7 +1119,7 @@ def plot_morphology_gene_heatmap(rho_df, fdr_df, gene_summary_df, out_dir, n_top
 
 def main():
     parser = argparse.ArgumentParser(
-        description="06: Morphology-to-Gene Spearman Rank Correlation Analysis (Backwards Compatible)"
+        description="04: Morphology-to-Gene Spearman Rank Correlation Analysis (Backwards Compatible)"
     )
     parser.add_argument(
         "--metadata_file",
@@ -1146,7 +1154,7 @@ def main():
     parser.add_argument(
         "--test_dir",
         type=str,
-        default="exp",
+        default=os.path.join(DEFAULT_DATA_DIR, "exp"),
         help="Legacy test/pilot directory fallback"
     )
     parser.add_argument(
@@ -1207,7 +1215,7 @@ def main():
         type=str,
         default="default",
         choices=["default", "raw_var", "log1p_var", "seurat", "seurat_v3"],
-        help="HVG selection method ('default' uses raw_var for Step 06)"
+        help="HVG selection method ('default' uses raw_var for Step 04)"
     )
     parser.add_argument(
         "--exclude_cell_cycle",
@@ -1230,7 +1238,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     print("==========================================================================")
-    print("   STEP 06: MORPHOLOGY-TO-GENE SPEARMAN CORRELATION ANALYSIS              ")
+    print("   STEP 04: MORPHOLOGY-TO-GENE SPEARMAN CORRELATION ANALYSIS              ")
     print("==========================================================================")
 
     # 1. Load QC-passed metadata (unified M1-M7 or legacy fallback)
@@ -1257,7 +1265,7 @@ def main():
     # Optional cited cell-cycle and/or custom gene exclusion (applied prior to depth adjustment & Spearman correlation)
     if args.exclude_cell_cycle or args.exclude_genes_file or args.exclude_genes:
         from cell_cycle import filter_excluded_genes
-        audit_path = os.path.join(args.out_dir, "06_excluded_genes_audit.csv")
+        audit_path = os.path.join(args.out_dir, "04_excluded_genes_audit.csv")
         keep_mask, _ = filter_excluded_genes(
             df_rna_raw.columns,
             exclude_cell_cycle=args.exclude_cell_cycle,
@@ -1328,7 +1336,7 @@ def main():
     plot_morphology_gene_heatmap(rho_df, fdr_df, gene_summary_df, args.out_dir)
 
     print("==========================================================================")
-    print("   STEP 06 COMPLETED SUCCESSFULLY                                         ")
+    print("   STEP 04 COMPLETED SUCCESSFULLY                                         ")
     print("==========================================================================")
 
 

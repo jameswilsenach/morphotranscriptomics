@@ -13,7 +13,7 @@ Features:
 6. Publication-ready UMAP figures colored by Supervised Ploidy, Train vs Pilot cohort, and marker genes (kalrn, pf4).
 
 Usage:
-    python 03_dimensionality_reduction.py --exp_dir "D:\\Morphotranscriptomic_Data\\expression" --out_dir "output"
+    python 03_dimensionality_reduction.py --exp_dir "data/expression" --out_dir "output"
 """
 
 import argparse
@@ -50,10 +50,11 @@ def load_and_preprocess_anndata(
     (ribosomal/Unnamed plus optional cited cell-cycle or custom gene exclusion),
     and merges QC-passed metadata.
     """
-    if not os.path.exists(exp_dir) and os.path.exists("exp"):
-        exp_dir = "exp"
-    elif not os.path.exists(exp_dir) and os.path.exists(r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"):
-        exp_dir = r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"
+    if not os.path.exists(exp_dir):
+        for fallback in [os.path.join("data", "exp"), "exp"]:
+            if os.path.exists(fallback):
+                exp_dir = fallback
+                break
 
     print(f"Loading AnnData from: {os.path.abspath(exp_dir)}")
     adata = sc.read_10x_mtx(exp_dir)
@@ -217,7 +218,7 @@ def plot_umap_projections(adata, out_dir, marker_genes=["kalrn", "pf4"]):
 
 def main():
     parser = argparse.ArgumentParser(description="03: Single Cell Transcriptomics PCA & UMAP Dimensionality Reduction")
-    parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
+    parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument(
         "--n_hvg",
@@ -261,6 +262,12 @@ def main():
     print(f"=== STEP 03: DIMENSIONALITY REDUCTION (PCA & UMAP) ===")
 
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
+    if not os.path.exists(qc_meta_path):
+        raise FileNotFoundError(
+            f"Missing prerequisite output from Step 1 (QC): '{qc_meta_path}'.\n"
+            f"Please run Step 1 first:\n"
+            f"  python run_master_analysis.py --step qc --out_dir \"{args.out_dir}\""
+        )
     adata = load_and_preprocess_anndata(
         args.exp_dir,
         qc_meta_path,

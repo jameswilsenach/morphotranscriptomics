@@ -2,11 +2,11 @@
 hvg_utils.py
 ------------
 Shared gene-prevalence filtering (`--min_cells_per_gene`) and Highly Variable Gene (HVG)
-selection utilities (`--n_hvg`, `--hvg_method`) across pipeline steps 03, 04, 04b, and 06.
+selection utilities (`--n_hvg`, `--hvg_method`) across pipeline steps 03, 04, 05, and 05b.
 
 Supported HVG selection methods:
-  - 'raw_var'   : Top N genes by variance on raw/input counts (baseline for Steps 03, 04b, 06)
-  - 'log1p_var' : Top N genes by variance on CP10K + log1p normalized counts (baseline for Step 04)
+  - 'raw_var'   : Top N genes by variance on raw/input counts (baseline for Steps 03, 04, 05b)
+  - 'log1p_var' : Top N genes by variance on CP10K + log1p normalized counts (baseline for Step 05)
   - 'seurat'    : Scanpy `sc.pp.highly_variable_genes(..., flavor='seurat')` on CP10K + log1p
   - 'seurat_v3' : Scanpy `sc.pp.highly_variable_genes(..., flavor='seurat_v3')` on raw counts
 """

@@ -1,5 +1,5 @@
 """
-04_mofa_multimodal_analysis.py
+05_mofa_multimodal_analysis.py
 ------------------------------
 Trains and evaluates Multi-Omics Factor Analysis (MOFA2) models integrating single-cell
 transcriptomics (RNA) and imaging flow cytometry (Morphology) data.
@@ -10,12 +10,12 @@ Workflow:
    - RNA view (default: 'poisson'): non-negative integer counts (raw counts or library size-factor normalized counts, without StandardScaler centering).
    - Morphology view (default: 'gaussian'): z-score standardized via StandardScaler (with optional signed log1p transformation).
 3. Sets up and trains mofapy2 entry point model with view-specific likelihoods (default: ['poisson', 'gaussian'], 10 factors, seed=42).
-4. Saves/loads mofa_model_rna_morphology.hdf5 model file.
+4. Saves/loads output/mofa_model_rna_morphology.hdf5 model file.
 5. Computes R2 / variance decomposition per view using mofax.
 6. Plots factor loadings and factor scatter projections colored by Supervised Ploidy.
 
 Usage:
-    python 04_mofa_multimodal_analysis.py --exp_dir "D:\\Morphotranscriptomic_Data\\expression" --out_dir "output" --rna_likelihood poisson
+    python 05_mofa_multimodal_analysis.py --exp_dir "data/expression" --out_dir "output" --rna_likelihood poisson
 """
 
 import argparse
@@ -179,10 +179,11 @@ def prepare_mofa_input_matrices(
     """
     import scanpy as sc
 
-    if not os.path.exists(exp_dir) and os.path.exists("exp"):
-        exp_dir = "exp"
-    elif not os.path.exists(exp_dir) and os.path.exists(r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"):
-        exp_dir = r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"
+    if not os.path.exists(exp_dir):
+        for fallback in [os.path.join("data", "exp"), "exp"]:
+            if os.path.exists(fallback):
+                exp_dir = fallback
+                break
 
     adata = sc.read_10x_mtx(exp_dir)
     adata.var_names_make_unique()
@@ -195,7 +196,7 @@ def prepare_mofa_input_matrices(
     # Optional cited cell-cycle and/or custom gene exclusion
     if exclude_cell_cycle or exclude_genes_file or exclude_genes:
         from cell_cycle import filter_excluded_genes
-        audit_path = os.path.join(out_dir, "04_mofa_excluded_genes_audit.csv") if out_dir else None
+        audit_path = os.path.join(out_dir, "05_mofa_excluded_genes_audit.csv") if out_dir else None
         keep_mask, _ = filter_excluded_genes(
             adata.var_names,
             exclude_cell_cycle=exclude_cell_cycle,
@@ -213,10 +214,12 @@ def prepare_mofa_input_matrices(
     if qc_meta_path and os.path.exists(qc_meta_path):
         meta_df = pd.read_csv(qc_meta_path, index_col=0)
     else:
-        local_meta = "meta.v1+flowSF.csv"
-        if os.path.exists(local_meta):
-            meta_df = pd.read_csv(local_meta, index_col=0)
-        else:
+        meta_df = None
+        for local_meta in [os.path.join("data", "meta.v1+flowSF.csv"), "meta.v1+flowSF.csv"]:
+            if os.path.exists(local_meta):
+                meta_df = pd.read_csv(local_meta, index_col=0)
+                break
+        if meta_df is None:
             raise FileNotFoundError("Metadata table not found for morphology features.")
 
     common_cells = df_raw.index.intersection(meta_df.index)
@@ -338,7 +341,7 @@ def evaluate_mofa_model(model_path, ploidy_series, out_dir):
         sns.heatmap(r2, annot=True, fmt=".2f", cmap="YlGnBu", ax=ax)
         ax.set_title("MOFA Variance Explained (R^2 %) Per View", fontsize=12, fontweight="bold")
         plt.tight_layout()
-        r2_path = os.path.join(out_dir, "04_mofa_r2_variance_explained.png")
+        r2_path = os.path.join(out_dir, "05_mofa_r2_variance_explained.png")
         plt.savefig(r2_path)
         plt.close()
         print(f"Saved MOFA R2 heatmap to: {os.path.abspath(r2_path)}")
@@ -365,7 +368,7 @@ def evaluate_mofa_model(model_path, ploidy_series, out_dir):
         ax.set_xlabel("Factor 1")
         ax.set_ylabel("Factor 2")
         plt.tight_layout()
-        factor_png = os.path.join(out_dir, "04_mofa_factor1_vs_factor2.png")
+        factor_png = os.path.join(out_dir, "05_mofa_factor1_vs_factor2.png")
         plt.savefig(factor_png)
         plt.close()
         print(f"Saved MOFA factor scatter plot to: {os.path.abspath(factor_png)}")
@@ -374,8 +377,8 @@ def evaluate_mofa_model(model_path, ploidy_series, out_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="04: Multi-Omics Factor Analysis (MOFA2) Integration")
-    parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
+    parser = argparse.ArgumentParser(description="05: Multi-Omics Factor Analysis (MOFA2) Integration")
+    parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument("--factors", type=int, default=10, help="Number of latent factors")
     parser.add_argument(
@@ -389,7 +392,7 @@ def main():
         type=str,
         default="default",
         choices=["default", "raw_var", "log1p_var", "seurat", "seurat_v3"],
-        help="HVG selection method ('default' uses log1p_var for Step 04)"
+        help="HVG selection method ('default' uses log1p_var for Step 05)"
     )
     parser.add_argument(
         "--min_cells_per_gene",
@@ -448,9 +451,15 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 04: MULTI-OMICS FACTOR ANALYSIS (MOFA2) ===")
+    print(f"=== STEP 05: MULTI-OMICS FACTOR ANALYSIS (MOFA2) ===")
 
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
+    if not os.path.exists(qc_meta_path):
+        raise FileNotFoundError(
+            f"Missing prerequisite output from Step 1 (QC): '{qc_meta_path}'.\n"
+            f"Please run Step 1 first:\n"
+            f"  python run_master_analysis.py --step qc --out_dir \"{args.out_dir}\""
+        )
     proc_rna, proc_img, ploidy_series = prepare_mofa_input_matrices(
         args.exp_dir,
         qc_meta_path,
@@ -467,7 +476,7 @@ def main():
         out_dir=args.out_dir,
     )
 
-    model_hdf5 = "mofa_model_rna_morphology.hdf5"
+    model_hdf5 = os.path.join(args.out_dir, "mofa_model_rna_morphology.hdf5")
     if not (args.reuse_model and os.path.exists(model_hdf5)):
         run_mofa_training(
             proc_rna,

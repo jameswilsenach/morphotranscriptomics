@@ -12,7 +12,7 @@ Features:
 5. Handles metadata formatting inconsistencies across Train and Pilot/Test datasets.
 
 Usage:
-    python 02_gene_expression_rankings.py --gene kalrn --n 10 --exp_dir "D:\\Morphotranscriptomic_Data\\expression" --out_dir "output"
+    python 02_gene_expression_rankings.py --gene kalrn --n 10 --exp_dir "data/expression" --out_dir "output"
 """
 
 import argparse
@@ -36,12 +36,13 @@ def setup_plot_style():
 def load_10x_expression_data(exp_dir):
     """
     Loads 10x expression matrix, cell barcodes, and gene feature annotations.
-    Prefers D:\\Morphotranscriptomic_Data\\expression if available, falling back to exp/ or Dropbox.
+    Checks the provided exp_dir first, falling back to data/exp or exp/.
     """
-    if not os.path.exists(exp_dir) and os.path.exists("exp"):
-        exp_dir = "exp"
-    elif not os.path.exists(exp_dir) and os.path.exists(r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"):
-        exp_dir = r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"
+    if not os.path.exists(exp_dir):
+        for fallback in [os.path.join("data", "exp"), "exp"]:
+            if os.path.exists(fallback):
+                exp_dir = fallback
+                break
     
     print(f"Loading 10x matrix from: {os.path.abspath(exp_dir)}")
 
@@ -264,7 +265,7 @@ def main():
     parser = argparse.ArgumentParser(description="02: Vectorized Gene Expression Ranking & Cell FCS/CVW Mapping")
     parser.add_argument("--gene", type=str, default="kalrn", help="Target gene symbol (e.g. kalrn, pf4)")
     parser.add_argument("--n", type=int, default=10, help="Number of top and bottom cells to select")
-    parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
+    parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument(
         "--exclude_cell_cycle",
@@ -301,8 +302,14 @@ def main():
         out_dir=args.out_dir,
     )
 
-    # Check for QC metadata from Step 01
+    # Check for prerequisite QC metadata from Step 01
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
+    if not os.path.exists(qc_meta_path):
+        raise FileNotFoundError(
+            f"Missing prerequisite output from Step 1 (QC): '{qc_meta_path}'.\n"
+            f"Please run Step 1 first:\n"
+            f"  python run_master_analysis.py --step qc --out_dir \"{args.out_dir}\""
+        )
 
     # Extract expression ranks
     ranked_df, matched_symbol = rank_gene_expression(

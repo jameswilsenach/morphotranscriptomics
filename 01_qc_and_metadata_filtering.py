@@ -16,7 +16,7 @@ Exact morphotrans2 QC Filter Criteria (Yields 393 QC-passed cells across M1-M7, 
 6. kallisto.nb_mapped > 20,000
 
 Usage:
-    python 01_qc_and_metadata_filtering.py --metadata_file "C:\\Users\\vilsn\\Dropbox\\Work\\Turing\\Exploration_Data\\Metadata_merged_YL_SF_20.10.26_v2.csv" --out_dir "output"
+    python 01_qc_and_metadata_filtering.py --metadata_file "data/Metadata_merged_YL_SF_20.10.26_v2.csv" --out_dir "output"
 """
 
 import argparse
@@ -151,8 +151,8 @@ def normalize_metadata(df, dataset_name="Combined"):
 
 def load_metadata_sources(
     metadata_file=None,
-    train_dir=r"D:\Morphotranscriptomic_Data",
-    test_dir="exp",
+    train_dir="data",
+    test_dir=os.path.join("data", "exp"),
     legacy_split=False
 ):
     """
@@ -165,7 +165,7 @@ def load_metadata_sources(
         if metadata_file:
             candidate_paths.append(metadata_file)
         candidate_paths.extend([
-            r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\Metadata_merged_YL_SF_20.10.26_v2.csv",
+            os.path.join("data", "Metadata_merged_YL_SF_20.10.26_v2.csv"),
             "Metadata_merged_YL_SF_20.10.26_v2.csv",
             os.path.join(train_dir, "Metadata_merged_YL_SF_20.10.26_v2.csv"),
         ])
@@ -191,9 +191,10 @@ def load_metadata_sources(
     train_contam_path = os.path.join(train_dir, "expression", "meta.contaminant.2.tsv")
 
     for fallback_contam in [
+        os.path.join("data", "meta.contaminant.2.tsv"),
+        os.path.join("data", "meta.contaminant.v1.csv"),
         "meta.contaminant.2.tsv",
         "meta.contaminant.v1.csv",
-        r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\meta.contaminant.v1.csv"
     ]:
         if not os.path.exists(train_contam_path) and os.path.exists(fallback_contam):
             train_contam_path = fallback_contam
@@ -221,9 +222,9 @@ def load_metadata_sources(
             metadata_frames.append(norm_train_contam)
 
     for local_meta_path in [
+        os.path.join("data", "meta.v1+flowSF.csv"),
         "meta.v1+flowSF.csv",
         os.path.join(test_dir, "meta.v1+flowSF.csv"),
-        r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\meta.v1+flowSF.csv"
     ]:
         if os.path.exists(local_meta_path):
             local_df = pd.read_csv(local_meta_path)
@@ -339,9 +340,9 @@ def plot_qc_metrics(df, out_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="01: Single Cell Morphotranscriptomics Quality Control & Metadata Filtering")
-    parser.add_argument("--metadata_file", type=str, default=r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\Metadata_merged_YL_SF_20.10.26_v2.csv", help="Path to unified multi-animal metadata CSV")
-    parser.add_argument("--train_dir", type=str, default=r"D:\Morphotranscriptomic_Data", help="Path to main Train data directory")
-    parser.add_argument("--test_dir", type=str, default="exp", help="Path to local Test/Pilot expression directory")
+    parser.add_argument("--metadata_file", type=str, default=os.path.join("data", "Metadata_merged_YL_SF_20.10.26_v2.csv"), help="Path to unified multi-animal metadata CSV")
+    parser.add_argument("--train_dir", type=str, default="data", help="Path to main Train data directory")
+    parser.add_argument("--test_dir", type=str, default=os.path.join("data", "exp"), help="Path to local Test/Pilot expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output CSVs and plots")
     parser.add_argument("--legacy_split", action="store_true", help="Force legacy Train/Pilot 2-dataset split ingestion for backwards compatibility")
     parser.add_argument("--min_mapped_reads", type=int, default=20000, help="Minimum kallisto.nb_mapped reads per cell (default: 20000)")

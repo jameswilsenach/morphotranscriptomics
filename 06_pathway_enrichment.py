@@ -1,17 +1,17 @@
 """
-05_pathway_enrichment.py
+06_pathway_enrichment.py
 ------------------------
 Performs biological pathway enrichment analysis (GSEA / gseapy ORA) and generates
 pathway dotplots and wordclouds matching morphotrans2 notebook methods.
 
 Features:
-1. Ingests top ranked genes from MOFA factor loadings or ploidy DEGs.
+1. Ingests top ranked genes from morphology-gene correlations, MOFA factor loadings, or ploidy DEGs.
 2. Runs over-representation analysis using gseapy (MSigDB Hallmark, KEGG, GO Biological Process).
 3. Generates pathway enrichment dotplots.
 4. Generates pathway wordcloud visualizations using WordCloud.
 
 Usage:
-    python 05_pathway_enrichment.py --gene_list "kalrn,pf4,runx1,itga2b,mpl" --out_dir "output"
+    python 06_pathway_enrichment.py --gene_list "kalrn,pf4,runx1,itga2b,mpl" --out_dir "output"
 """
 
 import argparse
@@ -94,7 +94,7 @@ def plot_pathway_dotplot(results_df, out_dir):
     ax.set_ylabel("Pathway Term")
     plt.tight_layout()
 
-    dot_png = os.path.join(out_dir, "05_pathway_enrichment_dotplot.png")
+    dot_png = os.path.join(out_dir, "06_pathway_enrichment_dotplot.png")
     plt.savefig(dot_png)
     plt.close()
     print(f"Saved pathway dotplot to: {os.path.abspath(dot_png)}")
@@ -131,20 +131,20 @@ def plot_pathway_wordcloud(results_df, out_dir):
     ax.set_title("Enriched Biological Pathways & Processes", fontsize=14, fontweight="bold")
     plt.tight_layout()
 
-    wc_png = os.path.join(out_dir, "05_pathway_wordcloud.png")
+    wc_png = os.path.join(out_dir, "06_pathway_wordcloud.png")
     plt.savefig(wc_png)
     plt.close()
     print(f"Saved pathway wordcloud to: {os.path.abspath(wc_png)}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="05: Biological Pathway Enrichment Analysis & WordCloud Generation")
+    parser = argparse.ArgumentParser(description="06: Biological Pathway Enrichment Analysis & WordCloud Generation")
     parser.add_argument("--gene_list", type=str, default="KALRN,PF4,RUNX1,ITGA2B,MPL,FLI1,GATA1,NFE2,GP1BB,TUBB1", help="Comma-separated gene symbols")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 05: PATHWAY ENRICHMENT & WORDCLOUD GENERATION ===")
+    print(f"=== STEP 06: PATHWAY ENRICHMENT & WORDCLOUD GENERATION ===")
 
     genes = [g.strip().upper() for g in args.gene_list.split(",") if g.strip()]
     print(f"Input Gene List ({len(genes)} genes): {genes}")

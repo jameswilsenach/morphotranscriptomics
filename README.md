@@ -80,20 +80,23 @@ pip install -r requirements.txt
 
 ## 🛠️ Pipeline Scripts Explained (Step-by-Step)
 
+Place input data files (metadata CSV, 10x expression folder `exp/` or `expression/`, and optional pre-saved `mofa_model_rna_morphology.hdf5`) in the gitignored `data/` directory at the repository root.
+
 ```
-Exploration_Data/
+morphotranscriptomics/
+├── data/                                    # Gitignored local input data (metadata CSV, exp/, optional HDF5)
 ├── requirements.txt                         # Conda environment package dependencies
-├── 01_qc_and_metadata_filtering.py          # Step 1: QC filtering & Multi-Animal metadata harmonization
-├── leave_one_animal_out_cv.py               # Step CV: Leave-One-Animal-Out Cross-Validation (LOAOCV)
-├── 02_gene_expression_rankings.py          # Step 2: Vectorized gene rankings & FCS/CVW mapping
-├── 03_dimensionality_reduction.py          # Step 3: Scanpy HVG selection, PCA, & UMAP
-├── 04_mofa_multimodal_analysis.py          # Step 4: Multi-Omics Factor Analysis (MOFA)
-├── 04b_mvae_multimodal_analysis.py         # Step 4b: PyTorch Multimodal VAE (MVAE)
-├── 05_pathway_enrichment.py                # Step 5: Pathway enrichment (gseapy) & WordCloud
-├── 06_morphology_gene_correlations.py      # Step 6: Spearman morphology-to-gene correlations & scatter grids
-├── cell_cycle.py                           # Shared cited cell-cycle & custom gene exclusion utilities
-├── hvg_utils.py                            # Shared gene prevalence (--min_cells_per_gene) & HVG selection utilities
-└── run_master_analysis.py                  # Master CLI Pipeline Runner
+├── 01_qc_and_metadata_filtering.py          # Step 1  (qc)           : QC filtering & Multi-Animal metadata harmonization
+├── 02_gene_expression_rankings.py           # Step 2  (rankings)     : Vectorized gene rankings & FCS/CVW mapping
+├── 03_dimensionality_reduction.py           # Step 3  (umap/dimred)  : Scanpy HVG selection, PCA, & UMAP
+├── 04_morphology_gene_correlations.py       # Step 4  (correlations) : Spearman morphology-to-gene correlations & scatter grids
+├── 05_mofa_multimodal_analysis.py           # Step 5  (mofa)         : Multi-Omics Factor Analysis (MOFA2)
+├── 05b_mvae_multimodal_analysis.py          # Step 5b (mvae)         : PyTorch Multimodal VAE (MVAE)
+├── 06_pathway_enrichment.py                 # Step 6  (enrichment)   : Pathway enrichment (gseapy) & WordCloud
+├── leave_one_animal_out_cv.py               # Step CV (cv/loaocv)    : Leave-One-Animal-Out Cross-Validation (LOAOCV)
+├── cell_cycle.py                            # Shared cited cell-cycle & custom gene exclusion utilities
+├── hvg_utils.py                             # Shared gene prevalence (--min_cells_per_gene) & HVG selection utilities
+└── run_master_analysis.py                   # Master CLI Pipeline Runner
 ```
 
 ---
@@ -148,51 +151,51 @@ Exploration_Data/
 
 ---
 
-### Step 4: Multi-Omics Factor Analysis (MOFA)
-**Script**: [`04_mofa_multimodal_analysis.py`](file:///c:/Users/vilsn/Dropbox/Work/Turing/Exploration_Data/04_mofa_multimodal_analysis.py)
+### Step 4: Morphology-to-Gene Spearman Rank Correlations
+**Script**: `04_morphology_gene_correlations.py` (`--step 4` or `--step correlations`)
 
-- **What it does for the biologist**: Integrates single-cell RNA expression and cell morphology using linear factor modeling (`mofapy2`). It calculates how much variance ($R^2$) is explained by each latent factor in gene expression vs. cell shape, and identifies top driving gene and morphology features.
+- **What it does for the biologist**: Computes robust pairwise **Spearman rank correlations ($\rho$)**, Benjamini–Hochberg FDR ($q$-values), and partial Spearman correlations controlling for $\log_2(\text{Ploidy})$ between all expressed genes and imaging flow cytometry morphology parameters across all 393 QC-passed cells (M1–M7), while remaining backwards-compatible with legacy single-cohort datasets (`--legacy_split` or `--cohort 10plate` / `--cohort 4plate`).
+- **Optional Gene Filtering**: Supports `--exclude_cell_cycle`, `--exclude_genes_file`, and `--exclude_genes` prior to library-depth adjustment and Spearman correlation testing, writing `output/04_excluded_genes_audit.csv` when filtering is enabled.
 - **Outputs**:
-  - `mofa_model_rna_morphology.hdf5`: Trained MOFA model.
-  - `output/04_mofa_r2_variance_explained.png`: Heatmap of $R^2$ variance explained per view.
-  - `output/04_mofa_factor1_vs_factor2.png`: Factor score scatter plot separating ploidy states.
+  - `output/04_top_gene_morphology_spearman_scatter_grid.png`: 12-panel scatter & regression grid of top positively/negatively correlated gene–morphology pairs colored by `Supervised_ploidy`.
+  - `output/04_gene_morphology_spearman_ranking_labeled.png`: Two-panel volcano & ranked bar chart labeling genes with particularly high Spearman $|\rho|$ and key megakaryocyte markers (`Ppbp`, `Pde3a`, `Mylk`, `Kalrn`, `Rock1`, `Exoc6`, `Pf4`, `Itga2b`).
+  - `output/04_morphology_gene_spearman_heatmap.png`: Hierarchically clustered Spearman correlation matrix across top genes and morphology features.
+  - `output/morphology_gene_spearman_top_pairs.csv` & `output/morphology_gene_spearman_per_gene_summary.csv`: Full tabular correlation statistics.
+  - `output/04_excluded_genes_audit.csv`: Audit log of excluded genes and provenance (created when filtering is enabled).
 
 ---
 
-### Step 4b: PyTorch Multimodal VAE (MVAE)
-**Script**: [`04b_mvae_multimodal_analysis.py`](file:///c:/Users/vilsn/Dropbox/Work/Turing/Exploration_Data/04b_mvae_multimodal_analysis.py)
+### Step 5: Multi-Omics Factor Analysis (MOFA)
+**Script**: `05_mofa_multimodal_analysis.py` (`--step 5` or `--step mofa`)
+
+- **What it does for the biologist**: Integrates single-cell RNA expression and cell morphology using linear factor modeling (`mofapy2`). It calculates how much variance ($R^2$) is explained by each latent factor in gene expression vs. cell shape, and identifies top driving gene and morphology features.
+- **Outputs**:
+  - `output/mofa_model_rna_morphology.hdf5`: Trained MOFA model.
+  - `output/05_mofa_r2_variance_explained.png`: Heatmap of $R^2$ variance explained per view.
+  - `output/05_mofa_factor1_vs_factor2.png`: Factor score scatter plot separating ploidy states.
+
+---
+
+### Step 5b: PyTorch Multimodal VAE (MVAE)
+**Script**: `05b_mvae_multimodal_analysis.py` (`--step 5b` or `--step mvae`)
 
 - **What it does for the biologist**: Uses a deep Multimodal Variational Autoencoder with a **Product-of-Experts (PoE)** encoder to learn a joint non-linear latent space $z$. Evaluates how accurately the neural network reconstructs original RNA expression and imaging morphology parameters.
 - **Outputs**:
   - `output/mvae_model_weights.pt`: Saved PyTorch model weights.
-  - `output/04b_mvae_training_loss_curve.png`: Convergence loss history (ELBO, Reconstruction, KL divergence).
-  - `output/04b_mvae_rna_reconstruction_scatter.png`: Original vs. reconstructed RNA expression scatter plot & $R^2$ score.
-  - `output/04b_mvae_morphology_reconstruction_scatter.png`: Original vs. reconstructed morphology parameters scatter plot & $R^2$ score.
-  - `output/04b_mvae_latent_space_umap.png`: UMAP of MVAE latent space $z$ colored by ploidy.
+  - `output/05b_mvae_training_loss_curve.png`: Convergence loss history (ELBO, Reconstruction, KL divergence).
+  - `output/05b_mvae_rna_reconstruction_scatter.png`: Original vs. reconstructed RNA expression scatter plot & $R^2$ score.
+  - `output/05b_mvae_morphology_reconstruction_scatter.png`: Original vs. reconstructed morphology parameters scatter plot & $R^2$ score.
+  - `output/05b_mvae_latent_space_umap.png`: UMAP of MVAE latent space $z$ colored by ploidy.
 
 ---
 
-### Step 5: Biological Pathway Enrichment & WordCloud
-**Script**: [`05_pathway_enrichment.py`](file:///c:/Users/vilsn/Dropbox/Work/Turing/Exploration_Data/05_pathway_enrichment.py)
+### Step 6: Biological Pathway Enrichment & WordCloud
+**Script**: `06_pathway_enrichment.py` (`--step 6` or `--step enrichment`)
 
 - **What it does for the biologist**: Runs Over-Representation Analysis (ORA / Enrichr) using `gseapy` against MSigDB Hallmark, KEGG, and GO Biological Process databases to highlight enriched biological pathways (e.g., platelet activation, endomitosis, cell cycle, cytoskeletal remodeling).
 - **Outputs**:
-  - `output/05_pathway_enrichment_dotplot.png`: Pathway enrichment dotplot.
-  - `output/05_pathway_wordcloud.png`: Biological pathway WordCloud visualization.
-
----
-
-### Step 6: Morphology-to-Gene Spearman Rank Correlations
-**Script**: [`06_morphology_gene_correlations.py`](file:///c:/Users/vilsn/Documents/morphotranscriptomics/06_morphology_gene_correlations.py)
-
-- **What it does for the biologist**: Computes robust pairwise **Spearman rank correlations ($\rho$)**, Benjamini–Hochberg FDR ($q$-values), and partial Spearman correlations controlling for $\log_2(\text{Ploidy})$ between all expressed genes and imaging flow cytometry morphology parameters across all 393 QC-passed cells (M1–M7), while remaining backwards-compatible with legacy single-cohort datasets (`--legacy_split` or `--cohort 10plate` / `--cohort 4plate`).
-- **Optional Gene Filtering**: Supports `--exclude_cell_cycle`, `--exclude_genes_file`, and `--exclude_genes` prior to library-depth adjustment and Spearman correlation testing, writing `output/06_excluded_genes_audit.csv` when filtering is enabled.
-- **Outputs**:
-  - `output/06_top_gene_morphology_spearman_scatter_grid.png`: 12-panel scatter & regression grid of top positively/negatively correlated gene–morphology pairs colored by `Supervised_ploidy`.
-  - `output/06_gene_morphology_spearman_ranking_labeled.png`: Two-panel volcano & ranked bar chart labeling genes with particularly high Spearman $|\rho|$ and key megakaryocyte markers (`Ppbp`, `Pde3a`, `Mylk`, `Kalrn`, `Rock1`, `Exoc6`, `Pf4`, `Itga2b`).
-  - `output/06_morphology_gene_spearman_heatmap.png`: Hierarchically clustered Spearman correlation matrix across top genes and morphology features.
-  - `output/morphology_gene_spearman_top_pairs.csv` & `output/morphology_gene_spearman_per_gene_summary.csv`: Full tabular correlation statistics.
-  - `output/06_excluded_genes_audit.csv`: Audit log of excluded genes and provenance (created when filtering is enabled).
+  - `output/06_pathway_enrichment_dotplot.png`: Pathway enrichment dotplot.
+  - `output/06_pathway_wordcloud.png`: Biological pathway WordCloud visualization.
 
 ---
 
@@ -232,8 +235,8 @@ You can run the entire pipeline end-to-end or individual steps using **`run_mast
 # Activate environment
 conda activate sc-analysis
 
-# Run FULL pipeline end-to-end (baseline without gene exclusions, matching original notebook)
-python run_master_analysis.py --train_dir "D:\Morphotranscriptomic_Data" --test_dir "exp" --out_dir "output" --gene kalrn
+# Run FULL pipeline end-to-end using default local data/ directory:
+python run_master_analysis.py --out_dir "output" --gene kalrn
 
 # Refine read-count QC, gene prevalence, and HVG selection criteria end-to-end:
 #   --min_mapped_reads (default: 20000), --min_map_pc (default: 50.0),
@@ -241,41 +244,25 @@ python run_master_analysis.py --train_dir "D:\Morphotranscriptomic_Data" --test_
 #   --hvg_method: default | raw_var | log1p_var | seurat | seurat_v3
 python run_master_analysis.py --min_mapped_reads 50000 --min_map_pc 60.0 --min_cells_per_gene 5 --n_hvg 3000 --hvg_method seurat --out_dir "output_refined"
 
+# Run individual steps by number or descriptive alias:
+#   1/qc, 2/rankings, 3/umap, 4/correlations, 5/mofa, 5b/mvae, 6/enrichment, cv/loaocv
+python run_master_analysis.py --step qc
+python run_master_analysis.py --step correlations --exclude_cell_cycle --out_dir "output_no_cc"
+python run_master_analysis.py --step mofa
+python run_master_analysis.py --step mvae
+python run_master_analysis.py --step cv
+
 # Exclude cited cell cycle genes (Tirosh et al. 2016 / Seurat cc.genes.updated.2019) across ALL analyses:
 python run_master_analysis.py --exclude_cell_cycle --out_dir "output_no_cc"
 
 # Exclude a custom gene list from a file (e.g., Mouse GO:0007049 Cell Cycle .txt/.csv/.tsv) across ALL analyses:
 python run_master_analysis.py --exclude_genes_file "my_genes_to_exclude.txt" --out_dir "output_custom_filter"
 
-# Apply gene filtering to JUST ONE analysis (e.g. Step 3 PCA/UMAP only):
-python run_master_analysis.py --step 3 --exclude_cell_cycle
-# or restrict exclusions to specific steps during a full pipeline run:
-python run_master_analysis.py --exclude_cell_cycle --exclude_steps 3,4
-
-# Run individual scripts directly with gene exclusion flags:
-python 03_dimensionality_reduction.py --exclude_cell_cycle
-python 03_dimensionality_reduction.py --exclude_genes_file "go_0007049.txt"
-python 04_mofa_multimodal_analysis.py --exclude_cell_cycle --exclude_genes "Mki67,Top2a"
-python 04b_mvae_multimodal_analysis.py --exclude_cell_cycle
-python 02_gene_expression_rankings.py --exclude_cell_cycle
-python 06_morphology_gene_correlations.py --exclude_cell_cycle
+# Apply gene filtering to specific steps (numbers or aliases):
+python run_master_analysis.py --exclude_cell_cycle --exclude_steps umap,correlations
 
 # Run backwards-compatible legacy Train/Pilot 2-dataset split:
 python run_master_analysis.py --legacy_split --out_dir "output_legacy"
-
-# Run Step 6 (Morphology-to-Gene Spearman Correlations) with cell-cycle exclusion:
-python run_master_analysis.py --step 6 --exclude_cell_cycle --out_dir "output_no_cc"
-
-# Run only Step 1 (Quality Control):
-python run_master_analysis.py --step 1
-
-# Run gene expression ranking for a different gene (e.g. pf4):
-python run_master_analysis.py --gene pf4
-
-# Run Leave-One-Animal-Out Cross-Validation:
-python run_master_analysis.py --step cv
-# or standalone:
-python leave_one_animal_out_cv.py
 ```
 
 ---
@@ -284,27 +271,27 @@ python leave_one_animal_out_cv.py
 
 | File / Figure Name | Description | Step |
 | :--- | :--- | :---: |
-| `qc_filtered_metadata.csv` | Cleaned table of all 291 QC-passed single cells | Step 1 |
-| `01_ploidy_distribution_qc.png` | Supervised ploidy cell counts before & after QC | Step 1 |
-| `01_kallisto_qc_metrics_violin.png` | Read depth & mapping % violin plots by ploidy | Step 1 |
-| `kalrn_top_bottom_cells.csv` | Top/bottom cell mapping to FCS, CVW, Mouse, Plate, Well | Step 2 |
-| `02_gene_rankings_kalrn.png` | Bar chart of top & bottom expressing cells | Step 2 |
-| `03_umap_supervised_ploidy.png` | UMAP landscape colored by genome ploidy | Step 3 |
-| `03_umap_dataset_cohort.png` | UMAP landscape comparing Train vs. Pilot cohorts | Step 3 |
-| `03_umap_gene_kalrn.png` | Expression gradient overlay on UMAP | Step 3 |
-| `04_mofa_r2_variance_explained.png` | MOFA $R^2$ variance decomposition per view | Step 4 |
-| `04_mofa_factor1_vs_factor2.png` | MOFA latent factor scatter plot by ploidy | Step 4 |
-| `04b_mvae_training_loss_curve.png` | PyTorch MVAE loss convergence history | Step 4b |
-| `04b_mvae_rna_reconstruction_scatter.png` | RNA expression reconstruction scatter & $R^2$ score | Step 4b |
-| `04b_mvae_morphology_reconstruction_scatter.png` | Morphology feature reconstruction scatter & $R^2$ score | Step 4b |
-| `04b_mvae_latent_space_umap.png` | MVAE PoE latent space UMAP by ploidy | Step 4b |
-| `05_pathway_enrichment_dotplot.png` | Enrichr biological pathway dotplot | Step 5 |
-| `05_pathway_wordcloud.png` | Biological pathway WordCloud | Step 5 |
-| `06_top_gene_morphology_spearman_scatter_grid.png` | 12-panel scatter & regression grid of top gene–morphology Spearman pairs | Step 6 |
-| `06_gene_morphology_spearman_ranking_labeled.png` | Volcano & ranked gene bar chart highlighting top Spearman $|\rho|$ & MK markers | Step 6 |
-| `06_morphology_gene_spearman_heatmap.png` | Hierarchically clustered gene–morphology Spearman correlation matrix | Step 6 |
-| `morphology_gene_spearman_top_pairs.csv` | Top 500 pairwise Spearman $\rho$, BH-FDR $q$, and partial $\rho\mid\text{ploidy}$ | Step 6 |
-| `morphology_gene_spearman_per_gene_summary.csv` | Per-gene strongest morphology correlation summary | Step 6 |
-| `*_excluded_genes_audit.csv` | Audit log of excluded cell-cycle / custom genes & citations (when enabled) | Steps 2–4b, 6 |
+| `qc_filtered_metadata.csv` | Cleaned table of all 393 QC-passed single cells (291 on M1–M5) | Step 1 (`qc`) |
+| `01_ploidy_distribution_qc.png` | Supervised ploidy cell counts before & after QC | Step 1 (`qc`) |
+| `01_kallisto_qc_metrics_violin.png` | Read depth & mapping % violin plots by ploidy | Step 1 (`qc`) |
+| `kalrn_top_bottom_cells.csv` | Top/bottom cell mapping to FCS, CVW, Mouse, Plate, Well | Step 2 (`rankings`) |
+| `02_gene_rankings_kalrn.png` | Bar chart of top & bottom expressing cells | Step 2 (`rankings`) |
+| `03_umap_supervised_ploidy.png` | UMAP landscape colored by genome ploidy | Step 3 (`umap`) |
+| `03_umap_dataset_cohort.png` | UMAP landscape comparing Train vs. Pilot cohorts | Step 3 (`umap`) |
+| `03_umap_gene_kalrn.png` | Expression gradient overlay on UMAP | Step 3 (`umap`) |
+| `04_top_gene_morphology_spearman_scatter_grid.png` | 12-panel scatter & regression grid of top gene–morphology Spearman pairs | Step 4 (`correlations`) |
+| `04_gene_morphology_spearman_ranking_labeled.png` | Volcano & ranked gene bar chart highlighting top Spearman $|\rho|$ & MK markers | Step 4 (`correlations`) |
+| `04_morphology_gene_spearman_heatmap.png` | Hierarchically clustered gene–morphology Spearman correlation matrix | Step 4 (`correlations`) |
+| `morphology_gene_spearman_top_pairs.csv` | Top 500 pairwise Spearman $\rho$, BH-FDR $q$, and partial $\rho\mid\text{ploidy}$ | Step 4 (`correlations`) |
+| `morphology_gene_spearman_per_gene_summary.csv` | Per-gene strongest morphology correlation summary | Step 4 (`correlations`) |
+| `05_mofa_r2_variance_explained.png` | MOFA $R^2$ variance decomposition per view | Step 5 (`mofa`) |
+| `05_mofa_factor1_vs_factor2.png` | MOFA latent factor scatter plot by ploidy | Step 5 (`mofa`) |
+| `05b_mvae_training_loss_curve.png` | PyTorch MVAE loss convergence history | Step 5b (`mvae`) |
+| `05b_mvae_rna_reconstruction_scatter.png` | RNA expression reconstruction scatter & $R^2$ score | Step 5b (`mvae`) |
+| `05b_mvae_morphology_reconstruction_scatter.png` | Morphology feature reconstruction scatter & $R^2$ score | Step 5b (`mvae`) |
+| `05b_mvae_latent_space_umap.png` | MVAE PoE latent space UMAP by ploidy | Step 5b (`mvae`) |
+| `06_pathway_enrichment_dotplot.png` | Enrichr biological pathway dotplot | Step 6 (`enrichment`) |
+| `06_pathway_wordcloud.png` | Biological pathway WordCloud | Step 6 (`enrichment`) |
+| `*_excluded_genes_audit.csv` | Audit log of excluded cell-cycle / custom genes & citations (when enabled) | Steps 2–5b |
 
 ---

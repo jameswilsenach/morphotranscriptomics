@@ -1,5 +1,5 @@
 """
-04b_mvae_multimodal_analysis.py
+05b_mvae_multimodal_analysis.py
 -------------------------------
 Implements a PyTorch Multimodal Variational Autoencoder (MVAE) for joint representation learning,
 cross-modality reconstruction, and latent space evaluation across single-cell RNA transcriptomics
@@ -12,13 +12,13 @@ MVAE Architecture:
 4. Loss Function: Joint ELBO = RNA Recon Loss + Morphology Recon Loss + beta * KL Divergence.
 
 Generated MVAE Figures:
-- 04b_mvae_rna_reconstruction_scatter.png (Original vs Reconstructed RNA expression & R^2 score)
-- 04b_mvae_morphology_reconstruction_scatter.png (Original vs Reconstructed Morphology parameters & R^2 score)
-- 04b_mvae_latent_space_umap.png (MVAE Latent Space z colored by Supervised Ploidy)
-- 04b_mvae_training_loss_curve.png (ELBO, Reconstruction, and KL Divergence loss curves)
+- 05b_mvae_rna_reconstruction_scatter.png (Original vs Reconstructed RNA expression & R^2 score)
+- 05b_mvae_morphology_reconstruction_scatter.png (Original vs Reconstructed Morphology parameters & R^2 score)
+- 05b_mvae_latent_space_umap.png (MVAE Latent Space z colored by Supervised Ploidy)
+- 05b_mvae_training_loss_curve.png (ELBO, Reconstruction, and KL Divergence loss curves)
 
 Usage:
-    python 04b_mvae_multimodal_analysis.py --exp_dir "D:\\Morphotranscriptomic_Data\\expression" --out_dir "output" --epochs 100 --latent_dim 10
+    python 05b_mvae_multimodal_analysis.py --exp_dir "data/expression" --out_dir "output" --epochs 100 --latent_dim 10
 """
 
 import argparse
@@ -168,10 +168,11 @@ def load_mvae_data(
     import scanpy as sc
     from hvg_utils import resolve_hvg_method, select_hvgs
 
-    if not os.path.exists(exp_dir) and os.path.exists("exp"):
-        exp_dir = "exp"
-    elif not os.path.exists(exp_dir) and os.path.exists(r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"):
-        exp_dir = r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\exp"
+    if not os.path.exists(exp_dir):
+        for fallback in [os.path.join("data", "exp"), "exp"]:
+            if os.path.exists(fallback):
+                exp_dir = fallback
+                break
 
     adata = sc.read_10x_mtx(exp_dir)
     adata.var_names_make_unique()
@@ -184,7 +185,7 @@ def load_mvae_data(
     # Optional cited cell-cycle and/or custom gene exclusion
     if exclude_cell_cycle or exclude_genes_file or exclude_genes:
         from cell_cycle import filter_excluded_genes
-        audit_path = os.path.join(out_dir, "04b_mvae_excluded_genes_audit.csv") if out_dir else None
+        audit_path = os.path.join(out_dir, "05b_mvae_excluded_genes_audit.csv") if out_dir else None
         keep_mask, _ = filter_excluded_genes(
             adata.var_names,
             exclude_cell_cycle=exclude_cell_cycle,
@@ -202,10 +203,12 @@ def load_mvae_data(
     if qc_meta_path and os.path.exists(qc_meta_path):
         meta_df = pd.read_csv(qc_meta_path, index_col=0)
     else:
-        local_meta = "meta.v1+flowSF.csv"
-        if os.path.exists(local_meta):
-            meta_df = pd.read_csv(local_meta, index_col=0)
-        else:
+        meta_df = None
+        for local_meta in [os.path.join("data", "meta.v1+flowSF.csv"), "meta.v1+flowSF.csv"]:
+            if os.path.exists(local_meta):
+                meta_df = pd.read_csv(local_meta, index_col=0)
+                break
+        if meta_df is None:
             raise FileNotFoundError("Metadata table not found for MVAE training.")
 
     common_cells = df_raw.index.intersection(meta_df.index)
@@ -311,7 +314,7 @@ def generate_mvae_figures(model, x_rna_tensor, x_img_tensor, ploidy_series, cell
     ax.set_ylabel("Loss")
     ax.legend()
     plt.tight_layout()
-    fig1_path = os.path.join(out_dir, "04b_mvae_training_loss_curve.png")
+    fig1_path = os.path.join(out_dir, "05b_mvae_training_loss_curve.png")
     plt.savefig(fig1_path)
     plt.close()
     print(f"Saved MVAE Loss Curve figure to: {os.path.abspath(fig1_path)}")
@@ -326,7 +329,7 @@ def generate_mvae_figures(model, x_rna_tensor, x_img_tensor, ploidy_series, cell
     ax.set_ylabel("Reconstructed Expression")
     ax.legend()
     plt.tight_layout()
-    fig2_path = os.path.join(out_dir, "04b_mvae_rna_reconstruction_scatter.png")
+    fig2_path = os.path.join(out_dir, "05b_mvae_rna_reconstruction_scatter.png")
     plt.savefig(fig2_path)
     plt.close()
     print(f"Saved RNA Reconstruction Scatter figure (R^2 = {r2_rna:.4f}) to: {os.path.abspath(fig2_path)}")
@@ -341,7 +344,7 @@ def generate_mvae_figures(model, x_rna_tensor, x_img_tensor, ploidy_series, cell
     ax.set_ylabel("Reconstructed Morphology")
     ax.legend()
     plt.tight_layout()
-    fig3_path = os.path.join(out_dir, "04b_mvae_morphology_reconstruction_scatter.png")
+    fig3_path = os.path.join(out_dir, "05b_mvae_morphology_reconstruction_scatter.png")
     plt.savefig(fig3_path)
     plt.close()
     print(f"Saved Morphology Reconstruction Scatter figure (R^2 = {r2_img:.4f}) to: {os.path.abspath(fig3_path)}")
@@ -370,7 +373,7 @@ def generate_mvae_figures(model, x_rna_tensor, x_img_tensor, ploidy_series, cell
     ax.set_xlabel("Latent UMAP 1")
     ax.set_ylabel("Latent UMAP 2")
     plt.tight_layout()
-    fig4_path = os.path.join(out_dir, "04b_mvae_latent_space_umap.png")
+    fig4_path = os.path.join(out_dir, "05b_mvae_latent_space_umap.png")
     plt.savefig(fig4_path)
     plt.close()
     print(f"Saved MVAE Latent Space UMAP figure to: {os.path.abspath(fig4_path)}")
@@ -382,8 +385,8 @@ def generate_mvae_figures(model, x_rna_tensor, x_img_tensor, ploidy_series, cell
 
 
 def main():
-    parser = argparse.ArgumentParser(description="04b: PyTorch Multimodal Variational Autoencoder (MVAE) Training & Reconstruction")
-    parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
+    parser = argparse.ArgumentParser(description="05b: PyTorch Multimodal Variational Autoencoder (MVAE) Training & Reconstruction")
+    parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--latent_dim", type=int, default=10, help="Dimension of latent space z")
@@ -398,7 +401,7 @@ def main():
         type=str,
         default="default",
         choices=["default", "raw_var", "log1p_var", "seurat", "seurat_v3"],
-        help="HVG selection method ('default' uses raw_var for Step 04b)"
+        help="HVG selection method ('default' uses raw_var for Step 05b)"
     )
     parser.add_argument(
         "--min_cells_per_gene",
@@ -426,9 +429,15 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 04b: PYTORCH MULTIMODAL VAE (MVAE) TRAINING & RECONSTRUCTION ===")
+    print(f"=== STEP 05b: PYTORCH MULTIMODAL VAE (MVAE) TRAINING & RECONSTRUCTION ===")
 
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
+    if not os.path.exists(qc_meta_path):
+        raise FileNotFoundError(
+            f"Missing prerequisite output from Step 1 (QC): '{qc_meta_path}'.\n"
+            f"Please run Step 1 first:\n"
+            f"  python run_master_analysis.py --step qc --out_dir \"{args.out_dir}\""
+        )
     scaled_rna, scaled_img, ploidy_series, rna_cols, img_cols, cell_ids = load_mvae_data(
         args.exp_dir,
         qc_meta_path,
