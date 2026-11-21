@@ -102,7 +102,7 @@ morphotranscriptomics/
 ---
 
 ### Step 1: Quality Control & Metadata Harmonization
-**Script**: [`01_qc_and_metadata_filtering.py`](file:///c:/Users/vilsn/Dropbox/Work/Turing/Exploration_Data/01_qc_and_metadata_filtering.py)
+**Script**: `01_qc_and_metadata_filtering.py` (`--step 1` or `--step qc`)
 
 - **What it does for the biologist**: Ingests raw sequencing statistics and metadata from `Metadata_merged_YL_SF_20.10.26_v2.csv`. It parses animal IDs (`mouse`), standardizes plate identifiers (`M1p1` = mouse 1 plate 1, etc.), filters out dead/contaminated/empty wells, and verifies the **393 QC-passed cell benchmark** across all 7 animals (including the 291 cell benchmark on M1–M5).
 - **Outputs**:
@@ -115,7 +115,7 @@ morphotranscriptomics/
 ---
 
 ### Step CV: Leave-One-Animal-Out Cross-Validation (LOAOCV)
-**Script**: [`leave_one_animal_out_cv.py`](file:///c:/Users/vilsn/Documents/morphotranscriptomics/leave_one_animal_out_cv.py)
+**Script**: `leave_one_animal_out_cv.py` (`--step cv` or `--step loaocv`)
 
 - **What it does for the biologist**: Replaces the previous 2-dataset split with a rigorous cross-validation loop iterating over all 7 animals ($M1, \dots, M7$). In each fold, one animal is held out while models (Random Forest classifier, Balanced Logistic Regression, Continuous Ridge regression, and PCA projections) are fitted exclusively on the other 6 animals. Evaluates true out-of-sample generalization for predicting genome ploidy ($2\text{n}$ to $32\text{n}$) from imaging morphology.
 - **Outputs**:
@@ -129,7 +129,7 @@ morphotranscriptomics/
 ---
 
 ### Step 2: Marker Gene Expression Rankings & Cell Mapping
-**Script**: [`02_gene_expression_rankings.py`](file:///c:/Users/vilsn/Dropbox/Work/Turing/Exploration_Data/02_gene_expression_rankings.py)
+**Script**: `02_gene_expression_rankings.py` (`--step 2` or `--step rankings`)
 
 - **What it does for the biologist**: Filters out non-informative ribosomal genes (`Rps`, `Rpl`) and unannotated genes (`Unnamed`). Finds the top-N highest and lowest expressing single cells for key megakaryocyte marker genes (e.g. `kalrn`, `pf4`, `itga2b`) using fast vectorized lookups. Automatically maps each cell to its mouse ID, plate, well, `.fcs` file, and `.cvw` file.
 - **Outputs**:
@@ -139,7 +139,7 @@ morphotranscriptomics/
 ---
 
 ### Step 3: Dimensionality Reduction (PCA & UMAP)
-**Script**: [`03_dimensionality_reduction.py`](file:///c:/Users/vilsn/Dropbox/Work/Turing/Exploration_Data/03_dimensionality_reduction.py)
+**Script**: `03_dimensionality_reduction.py` (`--step 3` or `--step umap`)
 
 - **What it does for the biologist**: Selects Highly Variable Genes (HVGs, default top 2,000; refinable via `--n_hvg`, `--hvg_method`, and `--min_cells_per_gene`), scales expression data, performs Principal Component Analysis (PCA), and projects cells onto a 2D UMAP manifold.
 - **Optional Gene Filtering (No Phase Inference)**: Supports `--exclude_cell_cycle` (drops the cited 97-gene Tirosh et al. 2016 / Seurat `cc.genes.updated.2019` set + legacy aliases), `--exclude_genes_file` (drops any user-supplied `.txt`/`.csv`/`.tsv` list, e.g. Mouse `GO:0007049`), and `--exclude_genes` (comma-separated symbols). Every excluded gene and its citation is recorded in `output/03_excluded_genes_audit.csv`. Discrete G1/S/G2M phase classification and regression are intentionally omitted because megakaryocytes undergo endomitosis rather than canonical diploid mitosis (Luecken & Theis, 2019).
@@ -201,7 +201,7 @@ morphotranscriptomics/
 
 ## 🔬 Cell Cycle Gene Lists & Phase Regression Methodology (Citations)
 
-This pipeline provides optional, auditable cell-cycle gene filtering via [`cell_cycle.py`](file:///c:/Users/vilsn/Documents/morphotranscriptomics/cell_cycle.py) across **Steps 2, 3, 4, 4b, and 6** (`--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`, `--exclude_steps`).
+This pipeline provides optional, auditable cell-cycle gene filtering via `cell_cycle.py` across **Steps 2, 3, 4, 5, and 5b** (`--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`, `--exclude_steps`).
 
 ### Cited Seurat Cell-Cycle Gene Lists
 - **Tirosh et al. (2016) / Seurat `cc.genes`**: Canonical human cell-cycle gene signature comprising **43 S-phase** and **54 G2/M-phase** markers (97 genes total) derived from single-cell RNA-seq of proliferating cells (Tirosh et al., 2016, *Science* 352(6282):189–196, DOI: [10.1126/science.aad0501](https://doi.org/10.1126/science.aad0501)).
@@ -220,10 +220,10 @@ In standard proliferating diploid scRNA-seq workflows, Seurat's **Cell-Cycle Sco
 
 ## 🔄 Backwards Compatibility with Legacy Datasets
 
-Both Step 1 (`01_qc_and_metadata_filtering.py`) and Step 6 (`06_morphology_gene_correlations.py`) retain full backwards compatibility with legacy Train/Pilot 2-dataset splits and older metadata schemas:
-- **Legacy Split Mode**: Pass `--legacy_split` to `run_master_analysis.py` or `01_qc_and_metadata_filtering.py` to ingest legacy Train (`Metadata_flow+well_id+supervised_ploidy.csv`, `meta.contaminant.2.tsv` / `meta.contaminant.v1.csv`) and Pilot (`meta.v1+flowSF.csv`) directories instead of the unified `Metadata_merged_YL_SF_20.10.26_v2.csv`.
+Both Step 1 (`01_qc_and_metadata_filtering.py`) and Step 4 (`04_morphology_gene_correlations.py`) retain full backwards compatibility with legacy Train/Pilot 2-dataset splits and older metadata schemas:
+- **Legacy Split Mode**: Pass `--legacy_split` to `run_master_analysis.py` or `01_qc_and_metadata_filtering.py` to ingest legacy Train (`Metadata_flow+well_id+supervised_ploidy.csv`, `meta.contaminant.2.tsv` / `meta.contaminant.v1.csv`) and Pilot (`meta.v1+flowSF.csv`) directories instead of the unified `data/Metadata_merged_YL_SF_20.10.26_v2.csv`.
 - **Legacy Column & Ploidy Normalization**: Automatically harmonizes older column conventions (`Well_ID`/`Well`/`Barcode`, `Mouse_Plate`/`Sample_Plate`/`orig.ident`, `Supervised_Ploidy_Images`/`Estimated_Ploidy_D.NA.A`, `kallisto_mapped`/`kallisto_mappe_pc`) and ploidy casing (`2N`–`32N` → `2n`–`32n`).
-- **Cohort Selection in Step 6**: Use `--cohort 10plate` (M1–M5), `--cohort 4plate` (M6–M7), or `--metadata_file <legacy_csv_or_tsv>` directly.
+- **Cohort Selection in Step 4**: Use `--cohort 10plate` (M1–M5), `--cohort 4plate` (M6–M7), or `--metadata_file <legacy_csv_or_tsv>` directly.
 
 ---
 
