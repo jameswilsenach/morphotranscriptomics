@@ -34,7 +34,7 @@ This runbook provides a standard operating procedure for evaluating **MOFA2 late
 Runs MOFA2 with `rna_likelihood=poisson` and `morph_likelihood=gaussian` across $K \in \{5, 10, 15\}$:
 
 ```powershell
-python run_master_analysis.py --step mofa --mofa_factors 5,10,15 --out_dir "output_mofa_sweep"
+python run_master_analysis.py --step mofa --mofa_factors "5,10,15" --out_dir "figures"
 ```
 
 ### B. Direct Step 5 Invocation (with Custom Options)
@@ -42,13 +42,13 @@ If you want to compare against a Gaussian RNA baseline (matching the original no
 
 ```powershell
 # Gaussian RNA sensitivity check across K = 5, 10, 15:
-python 05_mofa_multimodal_analysis.py --out_dir "output_mofa_gaussian" --factors 5,10,15 --rna_likelihood gaussian
+python 05_mofa_multimodal_analysis.py --out_dir "output_mofa_gaussian" --factors "5,10,15" --rna_likelihood gaussian
 
 # Cell-cycle gene exclusion sensitivity check across K = 5, 10, 15:
-python run_master_analysis.py --step mofa --mofa_factors 5,10,15 --exclude_cell_cycle --out_dir "output_mofa_no_cc"
+python run_master_analysis.py --step mofa --mofa_factors "5,10,15" --exclude_cell_cycle --out_dir "output_mofa_no_cc"
 
 # Regenerate R2 & heterogeneity plots from already-trained HDF5 files:
-python 05_mofa_multimodal_analysis.py --out_dir "output_mofa_sweep" --factors 5,10,15 --reuse_model
+python 05_mofa_multimodal_analysis.py --out_dir "figures" --factors "5,10,15" --reuse_model
 ```
 
 ---

@@ -305,6 +305,7 @@ def run_mofa_training(
     ent = entry_point()
     ent.set_data_matrix(
         data=data_matrix,
+        likelihoods=likelihoods,
         views_names=["RNA", "Morphology"],
         groups_names=["group1"],
         samples_names=[df_rna.index.tolist()],
@@ -315,7 +316,6 @@ def run_mofa_training(
     ent.set_data_options(scale_groups=False, scale_views=False)
     ent.set_model_options(
         factors=factors,
-        likelihoods=likelihoods,
         spikeslab_weights=True,
         ard_weights=True
     )
@@ -639,10 +639,20 @@ def evaluate_mofa_model(
 
         # 1. Plot Variance Explained (R2 Matrix)
         try:
-            r2 = model.get_r2()
+            r2_raw = model.get_r2()
+            if {"Factor", "View", "R2"}.issubset(r2_raw.columns):
+                r2_pivot = r2_raw.pivot_table(index="Factor", columns="View", values="R2", aggfunc="mean")
+                factor_order = sorted(
+                    r2_pivot.index,
+                    key=lambda x: int(re.sub(r"\D+", "", str(x)) or 0)
+                )
+                r2 = r2_pivot.reindex(factor_order)
+            else:
+                r2 = r2_raw.apply(pd.to_numeric, errors="coerce")
+
             for col in r2.columns:
                 summary[f"Total_R2_{col}"] = float(r2[col].sum())
-            fig, ax = plt.subplots(figsize=(8, 5))
+            fig, ax = plt.subplots(figsize=(8, max(5, 0.4 * len(r2) + 2)))
             sns.heatmap(r2, annot=True, fmt=".2f", cmap="YlGnBu", ax=ax)
             ax.set_title(f"MOFA Variance Explained (R^2 %) Per View{title_suffix}", fontsize=12, fontweight="bold")
             plt.tight_layout()

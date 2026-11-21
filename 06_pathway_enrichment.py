@@ -55,7 +55,7 @@ def run_enrichr_analysis(gene_list, gene_sets=["MSigDB_Hallmark_2020", "KEGG_202
         enr = gp.enrichr(
             gene_list=gene_list,
             gene_sets=gene_sets,
-            organism="Human",
+            organism="human",
             outdir=None
         )
         return enr.results
