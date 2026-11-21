@@ -432,9 +432,10 @@ def main():
         qc_df = pd.read_csv(args.qc_meta, index_col=0)
     else:
         print("QC metadata table not found in output directory. Running QC filtering from raw metadata...")
-        from 01_qc_and_metadata_filtering import load_metadata_sources, apply_qc_filters
-        raw_df = load_metadata_sources(metadata_file=args.metadata_file)
-        _, qc_df = apply_qc_filters(raw_df)
+        from importlib import import_module
+        qc_mod = import_module("01_qc_and_metadata_filtering")
+        raw_df = qc_mod.load_metadata_sources(metadata_file=args.metadata_file)
+        _, qc_df = qc_mod.apply_qc_filters(raw_df)
         qc_df.to_csv(os.path.join(args.out_dir, "qc_filtered_metadata.csv"))
 
     run_leave_one_animal_out_cv(qc_df, out_dir=args.out_dir)
