@@ -169,10 +169,14 @@ morphotranscriptomics/
 **Script**: `05_mofa_multimodal_analysis.py` (`--step 5` or `--step mofa`)
 
 - **What it does for the biologist**: Integrates single-cell RNA expression and cell morphology using linear factor modeling (`mofapy2`). It calculates how much variance ($R^2$) is explained by each latent factor in gene expression vs. cell shape, and identifies top driving gene and morphology features.
+- **Recommended Sensitivity Check (Multiple Factor Numbers)**: Because MOFA2 factor decomposition depends on the specified latent dimensionality $K$ (and ARD pruning), we recommend running MOFA across multiple factor counts—for example `K = 5, 10, 15` (`--mofa_factors 5,10,15` in `run_master_analysis.py` or `--factors 5,10,15` in `05_mofa_multimodal_analysis.py`)—to verify that total variance explained ($R^2$) and per-cell reconstruction error heterogeneity are stable across model capacities. See **[MOFA_FACTOR_VARIANCE_RUNBOOK.md](MOFA_FACTOR_VARIANCE_RUNBOOK.md)** for the full step-by-step runbook and diagnostic checklist.
 - **Outputs**:
-  - `output/mofa_model_rna_morphology.hdf5`: Trained MOFA model.
-  - `output/05_mofa_r2_variance_explained.png`: Heatmap of $R^2$ variance explained per view.
-  - `output/05_mofa_factor1_vs_factor2.png`: Factor score scatter plot separating ploidy states.
+  - `output/mofa_model_rna_morphology.hdf5` (or `*_k5.hdf5`, `*_k10.hdf5`, `*_k15.hdf5` when sweeping): Trained MOFA model(s).
+  - `output/05_mofa_r2_variance_explained.png` (or `*_k{K}.png`): Heatmap of $R^2$ variance explained per view.
+  - `output/05_mofa_factor1_vs_factor2.png` (or `*_k{K}.png`): Factor score scatter plot separating ploidy states.
+  - `output/05_mofa_reconstruction_error_heterogeneity.png` (or `*_k{K}.png`): Per-cell likelihood-aware MOFA reconstruction error (RMSE) stratified by ploidy and animal (`M1`–`M7`).
+  - `output/05_mofa_reconstruction_error_per_cell.csv` (or `*_k{K}.csv`): Cell-level MOFA reconstruction error table.
+  - `output/05_mofa_factor_sweep_summary.csv` & `output/05_mofa_factor_sweep_error_and_r2.png` (when multiple factor counts are passed): Total $R^2$ and RMSE comparison across tested $K$ values.
 
 ---
 
@@ -249,6 +253,8 @@ python run_master_analysis.py --min_mapped_reads 50000 --min_map_pc 60.0 --min_c
 python run_master_analysis.py --step qc
 python run_master_analysis.py --step correlations --exclude_cell_cycle --out_dir "output_no_cc"
 python run_master_analysis.py --step mofa
+# Recommended: compare MOFA across multiple factor numbers (e.g. 5, 10, 15):
+python run_master_analysis.py --step mofa --mofa_factors 5,10,15 --out_dir "output"
 python run_master_analysis.py --step mvae
 python run_master_analysis.py --step cv
 
@@ -286,6 +292,8 @@ python run_master_analysis.py --legacy_split --out_dir "output_legacy"
 | `morphology_gene_spearman_per_gene_summary.csv` | Per-gene strongest morphology correlation summary | Step 4 (`correlations`) |
 | `05_mofa_r2_variance_explained.png` | MOFA $R^2$ variance decomposition per view | Step 5 (`mofa`) |
 | `05_mofa_factor1_vs_factor2.png` | MOFA latent factor scatter plot by ploidy | Step 5 (`mofa`) |
+| `05_mofa_reconstruction_error_heterogeneity.png` | Per-cell MOFA reconstruction error (RMSE) heterogeneity by ploidy & animal | Step 5 (`mofa`) |
+| `05_mofa_factor_sweep_error_and_r2.png` | Multi-$K$ MOFA sweep comparing Total $R^2$ and RMSE across factor counts | Step 5 (`mofa`) |
 | `05b_mvae_training_loss_curve.png` | PyTorch MVAE loss convergence history | Step 5b (`mvae`) |
 | `05b_mvae_rna_reconstruction_scatter.png` | RNA expression reconstruction scatter & $R^2$ score | Step 5b (`mvae`) |
 | `05b_mvae_morphology_reconstruction_scatter.png` | Morphology feature reconstruction scatter & $R^2$ score | Step 5b (`mvae`) |

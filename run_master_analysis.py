@@ -153,6 +153,12 @@ def main():
     parser.add_argument("--loaocv", action="store_true", help="Enable Leave-One-Animal-Out Cross-Validation stage")
     parser.add_argument("--legacy_split", action="store_true", help="Force legacy Train/Pilot 2-dataset split ingestion for backwards compatibility")
     parser.add_argument(
+        "--mofa_factors",
+        type=str,
+        default="10",
+        help="Number of MOFA2 latent factors in Step 5, or comma-separated list to sweep (e.g. '5,10,15'; default: '10')"
+    )
+    parser.add_argument(
         "--rna_likelihood",
         type=str,
         default="poisson",
@@ -347,11 +353,12 @@ def main():
 
     # Step 5 (mofa): Multi-Omics Factor Analysis (MOFA) Integration
     if canonical_step in ["all", "5"]:
-        print(f"\n>>> STEP 5 (mofa): Multi-Omics Factor Analysis (MOFA2, RNA likelihood='{args.rna_likelihood}')")
+        print(f"\n>>> STEP 5 (mofa): Multi-Omics Factor Analysis (MOFA2, factors={args.mofa_factors}, RNA likelihood='{args.rna_likelihood}')")
         cmd = append_exclusion_flags([
             python_exe, "05_mofa_multimodal_analysis.py",
             "--exp_dir", exp_train_dir,
             "--out_dir", args.out_dir,
+            "--factors", str(args.mofa_factors),
             "--rna_likelihood", args.rna_likelihood,
             "--rna_norm", args.rna_norm,
             "--n_hvg", str(args.n_hvg),

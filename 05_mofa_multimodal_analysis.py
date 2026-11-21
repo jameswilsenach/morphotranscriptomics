@@ -39,6 +39,12 @@ try:
 except ImportError:
     MOFAX_AVAILABLE = False
 
+try:
+    import h5py
+    H5PY_AVAILABLE = True
+except ImportError:
+    H5PY_AVAILABLE = False
+
 
 def setup_plot_style():
     """Configures high-DPI matplotlib publication rendering matching morphotrans2 notebook."""
@@ -261,8 +267,15 @@ def prepare_mofa_input_matrices(
     )
 
     supervised_ploidy = meta_df.get("Supervised_ploidy", pd.Series("Unknown", index=common_cells))
+    if "mouse" in meta_df.columns:
+        mouse_series = meta_df["mouse"].fillna("Unknown").astype(str)
+    elif "Mouse_Plate" in meta_df.columns:
+        extracted = meta_df["Mouse_Plate"].astype(str).str.extract(r'^(?:Mouse|M)?(\d+)', expand=False, flags=re.IGNORECASE)
+        mouse_series = extracted.apply(lambda x: f"M{x}" if pd.notna(x) else "Unknown")
+    else:
+        mouse_series = pd.Series("Unknown", index=common_cells)
 
-    return proc_rna, proc_img, supervised_ploidy
+    return proc_rna, proc_img, supervised_ploidy, mouse_series
 
 
 def run_mofa_training(
@@ -320,67 +333,392 @@ def run_mofa_training(
     return True
 
 
-def evaluate_mofa_model(model_path, ploidy_series, out_dir):
+def parse_factor_counts(factors_arg):
     """
-    Computes R2 variance decomposition, top loadings, and factor projections using mofax.
+    Parses a single factor count (e.g. '10') or comma-separated list (e.g. '5,10,15')
+    into a deduplicated list of positive integers.
     """
+    counts = []
+    for tok in str(factors_arg).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        k = int(tok)
+        if k <= 0:
+            raise ValueError(f"Factor count must be a positive integer, got: {k}")
+        if k not in counts:
+            counts.append(k)
+    if not counts:
+        raise ValueError("At least one positive integer factor count must be provided to --factors.")
+    return counts
+
+
+def _decode_h5_strings(arr):
+    """Decodes HDF5 byte-string arrays to plain Python strings."""
+    return [x.decode("utf-8") if isinstance(x, (bytes, np.bytes_)) else str(x) for x in arr]
+
+
+def compute_mofa_reconstruction_errors(
+    model_path,
+    proc_rna,
+    proc_img,
+    ploidy_series,
+    mouse_series,
+    rna_likelihood="poisson",
+    morph_likelihood="gaussian",
+    factors_k=None,
+):
+    """
+    Computes likelihood-aware per-cell MOFA reconstruction error (RMSE) across views
+    (ported and generalized from Cell 50 of the original morphotrans2 notebook):
+      - gaussian  : RMSE(X, Z W^T) in z-score units
+      - poisson   : RMSE(log1p(X), log1p(softplus(Z W^T))) using MOFA2's softplus link
+      - bernoulli : RMSE(X, sigmoid(Z W^T))
+    """
+    if not (H5PY_AVAILABLE and os.path.exists(model_path)):
+        print("h5py not available or HDF5 model file not found. Skipping reconstruction error computation.")
+        return pd.DataFrame()
+
+    view_inputs = {
+        "RNA": (proc_rna, rna_likelihood),
+        "Morphology": (proc_img, morph_likelihood),
+    }
+
+    records = []
+    with h5py.File(model_path, "r") as f:
+        if "expectations" not in f or "Z" not in f["expectations"] or "W" not in f["expectations"]:
+            print("Warning: MOFA HDF5 missing expectations/Z or expectations/W; skipping reconstruction error.")
+            return pd.DataFrame()
+
+        # Load Z (N_cells x K)
+        z_group = f["expectations"]["Z"]
+        group_key = "group1" if "group1" in z_group else list(z_group.keys())[0]
+        Z = z_group[group_key][:]
+
+        # Sample names
+        if "samples" in f and group_key in f["samples"]:
+            sample_names = _decode_h5_strings(f["samples"][group_key][:])
+        else:
+            sample_names = proc_rna.index.tolist()
+
+        if Z.shape[0] != len(sample_names) and Z.shape[1] == len(sample_names):
+            Z = Z.T  # (N_cells, K)
+        n_cells, k_active = Z.shape
+        k_val = int(factors_k) if factors_k is not None else int(k_active)
+
+        ploidy_aligned = ploidy_series.reindex(sample_names).fillna("Unknown").astype(str).str.strip().str.lower().values
+        mouse_aligned = mouse_series.reindex(sample_names).fillna("Unknown").astype(str).values
+
+        for view_name in f["expectations"]["W"].keys():
+            W_v = f["expectations"]["W"][view_name][:]
+            if W_v.shape[0] == k_active and W_v.shape[1] != k_active:
+                W_v = W_v.T  # (D_v, K)
+
+            # Align observed feature matrix X_v (N_cells x D_v)
+            feat_names = None
+            if "features" in f and view_name in f["features"]:
+                feat_names = _decode_h5_strings(f["features"][view_name][:])
+
+            df_in, likelihood = view_inputs.get(view_name, (None, "gaussian"))
+            X_v = None
+            if df_in is not None:
+                if feat_names is not None and set(feat_names).issubset(df_in.columns):
+                    X_v = df_in.reindex(index=sample_names, columns=feat_names).fillna(0.0).values
+                elif df_in.shape == (n_cells, W_v.shape[0]):
+                    X_v = df_in.reindex(index=sample_names).fillna(0.0).values
+            if X_v is None and "data" in f and view_name in f["data"]:
+                d_node = f["data"][view_name]
+                X_raw = d_node[group_key][:] if isinstance(d_node, h5py.Group) and group_key in d_node else d_node[:]
+                if X_raw.shape[0] == W_v.shape[0] and X_raw.shape[1] == n_cells:
+                    X_raw = X_raw.T
+                X_v = np.nan_to_num(X_raw, nan=0.0)
+
+            if X_v is None or X_v.shape != (n_cells, W_v.shape[0]):
+                print(f"Warning: Could not align data matrix for view '{view_name}'; skipping RMSE.")
+                continue
+
+            eta = Z @ W_v.T  # Linear predictor (N_cells, D_v)
+            if likelihood == "poisson":
+                rate_hat = np.logaddexp(0.0, np.clip(eta, -30.0, 30.0))
+                rmse = np.sqrt(np.mean((np.log1p(np.clip(X_v, 0.0, None)) - np.log1p(rate_hat)) ** 2, axis=1))
+                metric_label = "RMSE (log1p Poisson rate)"
+            elif likelihood == "bernoulli":
+                prob_hat = 1.0 / (1.0 + np.exp(-np.clip(eta, -30.0, 30.0)))
+                rmse = np.sqrt(np.mean((X_v - prob_hat) ** 2, axis=1))
+                metric_label = "RMSE (Bernoulli prob)"
+            else:
+                rmse = np.sqrt(np.mean((X_v - eta) ** 2, axis=1))
+                metric_label = "RMSE (Gaussian z-score)"
+
+            for i in range(n_cells):
+                records.append({
+                    "SampleID": sample_names[i],
+                    "Supervised_ploidy": ploidy_aligned[i],
+                    "mouse": mouse_aligned[i],
+                    "Modality": view_name,
+                    "Likelihood": likelihood,
+                    "Error_Metric": metric_label,
+                    "RMSE": float(rmse[i]),
+                    "Factors_K": k_val,
+                })
+
+    return pd.DataFrame(records)
+
+
+def plot_mofa_heterogeneity_errors(rmse_df, out_dir, suffix=""):
+    """
+    Plots per-cell MOFA reconstruction error (heterogeneity) across views,
+    stratified by Supervised Ploidy and Animal (mouse), and saves the per-cell CSV.
+    """
+    if rmse_df.empty:
+        return
+
     os.makedirs(out_dir, exist_ok=True)
     setup_plot_style()
 
-    if not (MOFAX_AVAILABLE and os.path.exists(model_path)):
-        print("mofax not available or HDF5 model file not found. Generating fallback PCA/Factor analysis.")
+    csv_path = os.path.join(out_dir, f"05_mofa_reconstruction_error_per_cell{suffix}.csv")
+    rmse_df.to_csv(csv_path, index=False)
+    print(f"Saved per-cell MOFA reconstruction errors to: {os.path.abspath(csv_path)}")
+
+    title_suffix = f" ({suffix.lstrip('_').upper()})" if suffix else ""
+    ploidy_order = [p for p in ["2n", "4n", "8n", "16n", "32n"] if p in rmse_df["Supervised_ploidy"].unique()]
+    mice = sorted([m for m in rmse_df["mouse"].unique() if m != "Unknown"])
+    show_mouse_panel = len(mice) > 1
+
+    n_cols = 2 if show_mouse_panel else 1
+    fig, axes = plt.subplots(1, n_cols, figsize=(7.5 * n_cols, 5.5))
+    if n_cols == 1:
+        axes = [axes]
+
+    # Panel A: Heterogeneity by Ploidy across Views
+    ax0 = axes[0]
+    plot_ploidy = rmse_df[rmse_df["Supervised_ploidy"].isin(ploidy_order)] if ploidy_order else rmse_df
+    sns.boxplot(
+        data=plot_ploidy,
+        x="Modality",
+        y="RMSE",
+        hue="Supervised_ploidy" if ploidy_order else None,
+        hue_order=ploidy_order if ploidy_order else None,
+        palette="viridis",
+        width=0.65,
+        fliersize=2.5,
+        ax=ax0,
+    )
+    ax0.set_title(f"MOFA Reconstruction Error Heterogeneity by Ploidy{title_suffix}", fontsize=11, fontweight="bold")
+    ax0.set_xlabel("Omics Modality / View")
+    ax0.set_ylabel("Per-Cell Reconstruction Error (RMSE)")
+    if ploidy_order:
+        ax0.legend(title="Ploidy", frameon=True, loc="upper right")
+
+    # Panel B: Heterogeneity by Animal (Mouse) across Views
+    if show_mouse_panel:
+        ax1 = axes[1]
+        plot_mouse = rmse_df[rmse_df["mouse"].isin(mice)]
+        sns.boxplot(
+            data=plot_mouse,
+            x="Modality",
+            y="RMSE",
+            hue="mouse",
+            hue_order=mice,
+            palette="Set2",
+            width=0.65,
+            fliersize=2.5,
+            ax=ax1,
+        )
+        ax1.set_title(f"MOFA Reconstruction Error Heterogeneity by Animal{title_suffix}", fontsize=11, fontweight="bold")
+        ax1.set_xlabel("Omics Modality / View")
+        ax1.set_ylabel("Per-Cell Reconstruction Error (RMSE)")
+        ax1.legend(title="Animal", frameon=True, loc="upper right", ncol=2)
+
+    plt.tight_layout()
+    fig_path = os.path.join(out_dir, f"05_mofa_reconstruction_error_heterogeneity{suffix}.png")
+    plt.savefig(fig_path)
+    plt.close()
+    print(f"Saved MOFA heterogeneity error plot to: {os.path.abspath(fig_path)}")
+
+
+def plot_mofa_factor_sweep_comparison(sweep_df, all_rmse_df, out_dir):
+    """
+    Plots total variance explained (R^2 %) and per-cell reconstruction error (RMSE)
+    across the swept factor counts K (e.g. K = 5, 10, 15).
+    """
+    if sweep_df.empty and all_rmse_df.empty:
         return
 
-    print(f"Loading trained MOFA model from: {model_path}")
-    model = fx.mofa_model(model_path)
+    os.makedirs(out_dir, exist_ok=True)
+    setup_plot_style()
 
-    # 1. Plot Variance Explained (R2 Matrix)
-    try:
-        r2 = model.get_r2()
-        fig, ax = plt.subplots(figsize=(8, 5))
-        sns.heatmap(r2, annot=True, fmt=".2f", cmap="YlGnBu", ax=ax)
-        ax.set_title("MOFA Variance Explained (R^2 %) Per View", fontsize=12, fontweight="bold")
-        plt.tight_layout()
-        r2_path = os.path.join(out_dir, "05_mofa_r2_variance_explained.png")
-        plt.savefig(r2_path)
-        plt.close()
-        print(f"Saved MOFA R2 heatmap to: {os.path.abspath(r2_path)}")
-    except Exception as e:
-        print(f"Could not compute R2 heatmap: {e}")
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 
-    # 2. Factor Scatter Plot (Factor 1 vs Factor 2)
-    try:
-        factors = model.get_factors()
-        factors_df = pd.DataFrame(factors, index=model.get_samples())
-        factors_df["Supervised_ploidy"] = ploidy_series.reindex(factors_df.index).fillna("Unknown").values
+    # Left panel: Total R^2 (%) per view vs K
+    ax0 = axes[0]
+    r2_cols = [c for c in sweep_df.columns if c.startswith("Total_R2_")]
+    if r2_cols:
+        for col in r2_cols:
+            view_label = col.replace("Total_R2_", "")
+            ax0.plot(
+                sweep_df["Factors_K"],
+                sweep_df[col],
+                marker="o",
+                linewidth=2.2,
+                markersize=7,
+                label=view_label,
+            )
+        ax0.set_xticks(sweep_df["Factors_K"].tolist())
+        ax0.set_xlabel("Number of MOFA Factors (K)")
+        ax0.set_ylabel("Total Variance Explained (R^2 %)")
+        ax0.set_title("MOFA Factor Sweep: Variance Explained (R^2) vs. K", fontsize=12, fontweight="bold")
+        ax0.legend(title="View", frameon=True)
+    else:
+        ax0.text(0.5, 0.5, "R^2 summary unavailable", ha="center", va="center")
+        ax0.axis("off")
 
-        fig, ax = plt.subplots(figsize=(8, 6))
-        sns.scatterplot(
-            data=factors_df,
-            x=0,
-            y=1,
-            hue="Supervised_ploidy",
-            palette="tab10",
-            s=60,
-            ax=ax
+    # Right panel: Per-cell Reconstruction Error (RMSE) across K
+    ax1 = axes[1]
+    if not all_rmse_df.empty:
+        df_plot = all_rmse_df.copy()
+        df_plot["Factors_K_str"] = df_plot["Factors_K"].astype(str)
+        k_order = [str(k) for k in sorted(all_rmse_df["Factors_K"].unique())]
+        sns.boxplot(
+            data=df_plot,
+            x="Factors_K_str",
+            y="RMSE",
+            hue="Modality",
+            order=k_order,
+            palette="Set1",
+            width=0.55,
+            fliersize=2.5,
+            ax=ax1,
         )
-        ax.set_title("MOFA Factor Projection: Factor 1 vs Factor 2", fontsize=13, fontweight="bold")
-        ax.set_xlabel("Factor 1")
-        ax.set_ylabel("Factor 2")
-        plt.tight_layout()
-        factor_png = os.path.join(out_dir, "05_mofa_factor1_vs_factor2.png")
-        plt.savefig(factor_png)
-        plt.close()
-        print(f"Saved MOFA factor scatter plot to: {os.path.abspath(factor_png)}")
-    except Exception as e:
-        print(f"Could not plot factor scatter: {e}")
+        ax1.set_xlabel("Number of MOFA Factors (K)")
+        ax1.set_ylabel("Per-Cell Reconstruction Error (RMSE)")
+        ax1.set_title("MOFA Factor Sweep: Reconstruction Error Heterogeneity vs. K", fontsize=12, fontweight="bold")
+        ax1.legend(title="View", frameon=True)
+    else:
+        ax1.text(0.5, 0.5, "Reconstruction error unavailable", ha="center", va="center")
+        ax1.axis("off")
+
+    plt.tight_layout()
+    fig_path = os.path.join(out_dir, "05_mofa_factor_sweep_error_and_r2.png")
+    plt.savefig(fig_path)
+    plt.close()
+    print(f"Saved MOFA factor sweep comparison plot to: {os.path.abspath(fig_path)}")
+
+
+def evaluate_mofa_model(
+    model_path,
+    ploidy_series,
+    out_dir,
+    suffix="",
+    proc_rna=None,
+    proc_img=None,
+    mouse_series=None,
+    rna_likelihood="poisson",
+    morph_likelihood="gaussian",
+    factors_k=None,
+):
+    """
+    Computes R2 variance decomposition, factor projections, and per-cell reconstruction
+    error heterogeneity plots for a trained MOFA2 model.
+    Returns (summary_dict, rmse_df).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    setup_plot_style()
+    summary = {}
+    rmse_df = pd.DataFrame()
+
+    if not os.path.exists(model_path):
+        print("HDF5 model file not found. Skipping MOFA evaluation.")
+        return summary, rmse_df
+
+    title_suffix = f" ({suffix.lstrip('_').upper()})" if suffix else ""
+
+    if MOFAX_AVAILABLE:
+        print(f"Loading trained MOFA model from: {model_path}")
+        model = fx.mofa_model(model_path)
+
+        # 1. Plot Variance Explained (R2 Matrix)
+        try:
+            r2 = model.get_r2()
+            for col in r2.columns:
+                summary[f"Total_R2_{col}"] = float(r2[col].sum())
+            fig, ax = plt.subplots(figsize=(8, 5))
+            sns.heatmap(r2, annot=True, fmt=".2f", cmap="YlGnBu", ax=ax)
+            ax.set_title(f"MOFA Variance Explained (R^2 %) Per View{title_suffix}", fontsize=12, fontweight="bold")
+            plt.tight_layout()
+            r2_path = os.path.join(out_dir, f"05_mofa_r2_variance_explained{suffix}.png")
+            plt.savefig(r2_path)
+            plt.close()
+            print(f"Saved MOFA R2 heatmap to: {os.path.abspath(r2_path)}")
+        except Exception as e:
+            print(f"Could not compute R2 heatmap: {e}")
+
+        # 2. Factor Scatter Plot (Factor 1 vs Factor 2)
+        try:
+            factors = model.get_factors()
+            factors_df = pd.DataFrame(factors, index=model.get_samples())
+            factors_df["Supervised_ploidy"] = ploidy_series.reindex(factors_df.index).fillna("Unknown").values
+
+            fig, ax = plt.subplots(figsize=(8, 6))
+            sns.scatterplot(
+                data=factors_df,
+                x=0,
+                y=1,
+                hue="Supervised_ploidy",
+                palette="tab10",
+                s=60,
+                ax=ax
+            )
+            ax.set_title(f"MOFA Factor Projection: Factor 1 vs Factor 2{title_suffix}", fontsize=13, fontweight="bold")
+            ax.set_xlabel("Factor 1")
+            ax.set_ylabel("Factor 2")
+            plt.tight_layout()
+            factor_png = os.path.join(out_dir, f"05_mofa_factor1_vs_factor2{suffix}.png")
+            plt.savefig(factor_png)
+            plt.close()
+            print(f"Saved MOFA factor scatter plot to: {os.path.abspath(factor_png)}")
+        except Exception as e:
+            print(f"Could not plot factor scatter: {e}")
+    else:
+        print("mofax not available; skipping R2 heatmap and factor scatter.")
+
+    # 3. Per-Cell Reconstruction Error & Heterogeneity Plots
+    if proc_rna is not None and proc_img is not None:
+        if mouse_series is None:
+            mouse_series = pd.Series("Unknown", index=ploidy_series.index)
+        try:
+            rmse_df = compute_mofa_reconstruction_errors(
+                model_path=model_path,
+                proc_rna=proc_rna,
+                proc_img=proc_img,
+                ploidy_series=ploidy_series,
+                mouse_series=mouse_series,
+                rna_likelihood=rna_likelihood,
+                morph_likelihood=morph_likelihood,
+                factors_k=factors_k,
+            )
+            if not rmse_df.empty:
+                for view_name, grp in rmse_df.groupby("Modality"):
+                    summary[f"Mean_RMSE_{view_name}"] = float(grp["RMSE"].mean())
+                    summary[f"Median_RMSE_{view_name}"] = float(grp["RMSE"].median())
+                    summary[f"IQR_RMSE_{view_name}"] = float(grp["RMSE"].quantile(0.75) - grp["RMSE"].quantile(0.25))
+                plot_mofa_heterogeneity_errors(rmse_df, out_dir, suffix=suffix)
+        except Exception as e:
+            print(f"Could not compute/plot MOFA reconstruction error heterogeneity: {e}")
+
+    return summary, rmse_df
 
 
 def main():
     parser = argparse.ArgumentParser(description="05: Multi-Omics Factor Analysis (MOFA2) Integration")
     parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
-    parser.add_argument("--factors", type=int, default=10, help="Number of latent factors")
+    parser.add_argument(
+        "--factors",
+        type=str,
+        default="10",
+        help="Number of latent factors, or comma-separated list to sweep (e.g. '5,10,15'; default: '10')"
+    )
     parser.add_argument(
         "--n_hvg",
         type=int,
@@ -460,7 +798,7 @@ def main():
             f"Please run Step 1 first:\n"
             f"  python run_master_analysis.py --step qc --out_dir \"{args.out_dir}\""
         )
-    proc_rna, proc_img, ploidy_series = prepare_mofa_input_matrices(
+    proc_rna, proc_img, ploidy_series, mouse_series = prepare_mofa_input_matrices(
         args.exp_dir,
         qc_meta_path,
         n_hvg=args.n_hvg,
@@ -476,18 +814,49 @@ def main():
         out_dir=args.out_dir,
     )
 
-    model_hdf5 = os.path.join(args.out_dir, "mofa_model_rna_morphology.hdf5")
-    if not (args.reuse_model and os.path.exists(model_hdf5)):
-        run_mofa_training(
-            proc_rna,
-            proc_img,
-            output_hdf5=model_hdf5,
-            factors=args.factors,
-            rna_likelihood=args.rna_likelihood,
-            morph_likelihood=args.morph_likelihood
-        )
+    factor_counts = parse_factor_counts(args.factors)
+    multi_k = len(factor_counts) > 1
+    sweep_records = []
+    rmse_frames = []
 
-    evaluate_mofa_model(model_hdf5, ploidy_series, args.out_dir)
+    for k in factor_counts:
+        suffix = f"_k{k}" if multi_k else ""
+        model_hdf5 = os.path.join(args.out_dir, f"mofa_model_rna_morphology{suffix}.hdf5")
+        if multi_k:
+            print(f"\n--- MOFA2 Factor Sweep: K = {k} ---")
+        if not (args.reuse_model and os.path.exists(model_hdf5)):
+            run_mofa_training(
+                proc_rna,
+                proc_img,
+                output_hdf5=model_hdf5,
+                factors=k,
+                rna_likelihood=args.rna_likelihood,
+                morph_likelihood=args.morph_likelihood
+            )
+
+        summary, rmse_df = evaluate_mofa_model(
+            model_hdf5,
+            ploidy_series,
+            args.out_dir,
+            suffix=suffix,
+            proc_rna=proc_rna,
+            proc_img=proc_img,
+            mouse_series=mouse_series,
+            rna_likelihood=args.rna_likelihood,
+            morph_likelihood=args.morph_likelihood,
+            factors_k=k,
+        )
+        sweep_records.append({"Factors_K": k, "Model_Path": os.path.abspath(model_hdf5), **summary})
+        if not rmse_df.empty:
+            rmse_frames.append(rmse_df)
+
+    if multi_k and sweep_records:
+        sweep_df = pd.DataFrame(sweep_records)
+        sweep_csv = os.path.join(args.out_dir, "05_mofa_factor_sweep_summary.csv")
+        sweep_df.to_csv(sweep_csv, index=False)
+        print(f"\nSaved MOFA2 multi-factor sweep summary to: {os.path.abspath(sweep_csv)}")
+        all_rmse_df = pd.concat(rmse_frames, ignore_index=True) if rmse_frames else pd.DataFrame()
+        plot_mofa_factor_sweep_comparison(sweep_df, all_rmse_df, args.out_dir)
 
 
 if __name__ == "__main__":
