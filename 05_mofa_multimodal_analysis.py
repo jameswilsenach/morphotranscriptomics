@@ -167,6 +167,7 @@ def normalize_morphology_for_likelihood(img_df, likelihood="gaussian", log_morph
 def prepare_mofa_input_matrices(
     exp_dir,
     qc_meta_path,
+    mofa_hdf5_path=None,
     n_hvg=2000,
     hvg_method="default",
     min_cells_per_gene=0,
@@ -174,94 +175,106 @@ def prepare_mofa_input_matrices(
     morph_likelihood="gaussian",
     rna_norm="raw_counts",
     log_morph=False,
+    adjust_library_depth=False,
     exclude_cell_cycle=False,
     exclude_genes_file=None,
     exclude_genes=None,
     out_dir=None,
 ):
     """
-    Ingests and normalizes RNA expression and Morphology data for common QC-passed cells
-    according to the target MOFA2 view likelihoods.
+    Ingests, aligns, and normalizes RNA expression and Morphology data across all available
+    QC-passed cells (e.g. all 393 cells across M1-M7 by combining 10x matrices and
+    pre-saved MOFA HDF5 expression when needed) according to the target MOFA2 view likelihoods.
+    Returns (proc_rna, proc_img, supervised_ploidy, mouse_series, effective_rna_likelihood).
     """
-    import scanpy as sc
+    from importlib import import_module
+    corr_mod = import_module("04_morphology_gene_correlations")
 
-    if not os.path.exists(exp_dir):
-        for fallback in [os.path.join("data", "exp"), "exp"]:
-            if os.path.exists(fallback):
-                exp_dir = fallback
+    # Load QC metadata for morphology features
+    if qc_meta_path and os.path.exists(qc_meta_path):
+        meta_df = pd.read_csv(qc_meta_path, index_col=0)
+        if "SampleID" not in meta_df.columns:
+            meta_df["SampleID"] = meta_df.index.astype(str)
+        meta_df.index = meta_df.index.astype(str)
+    else:
+        meta_df = None
+        for local_meta in [os.path.join("data", "meta.v1+flowSF.csv"), "meta.v1+flowSF.csv"]:
+            if os.path.exists(local_meta):
+                meta_df = pd.read_csv(local_meta, index_col=0)
+                meta_df.index = meta_df.index.astype(str)
                 break
+        if meta_df is None:
+            raise FileNotFoundError("Metadata table not found for morphology features.")
 
-    adata = sc.read_10x_mtx(exp_dir)
-    adata.var_names_make_unique()
-
-    # Gene filter rule
-    is_ribo = adata.var_names.str.startswith(('Rps', 'Rpl'))
-    is_unnamed = adata.var_names.str.startswith('Unnamed')
-    adata = adata[:, ~(is_ribo | is_unnamed)].copy()
+    # Load barcode-aligned expression across all available cohorts (10x + MOFA HDF5 fallback)
+    df_rna, cohort_sources = corr_mod.load_expression_backwards_compatible(
+        meta_df,
+        exp_dir=exp_dir,
+        pilot_exp_dir=os.path.join("data", "exp"),
+        mofa_hdf5_path=mofa_hdf5_path,
+        n_hvg=n_hvg,
+        hvg_method=hvg_method,
+        min_cells_per_gene=min_cells_per_gene,
+    )
 
     # Optional cited cell-cycle and/or custom gene exclusion
     if exclude_cell_cycle or exclude_genes_file or exclude_genes:
         from cell_cycle import filter_excluded_genes
         audit_path = os.path.join(out_dir, "05_mofa_excluded_genes_audit.csv") if out_dir else None
         keep_mask, _ = filter_excluded_genes(
-            adata.var_names,
+            df_rna.columns,
             exclude_cell_cycle=exclude_cell_cycle,
             exclude_genes_file=exclude_genes_file,
             exclude_genes=exclude_genes,
             audit_csv_path=audit_path,
         )
-        adata = adata[:, keep_mask].copy()
+        df_rna = df_rna.loc[:, keep_mask].copy()
     else:
         print("[Gene Filter] MOFA2 RNA View: No additional gene exclusions applied (baseline).")
 
-    df_raw = adata.to_df()
-
-    # Load QC metadata for morphology features
-    if qc_meta_path and os.path.exists(qc_meta_path):
-        meta_df = pd.read_csv(qc_meta_path, index_col=0)
-    else:
-        meta_df = None
-        for local_meta in [os.path.join("data", "meta.v1+flowSF.csv"), "meta.v1+flowSF.csv"]:
-            if os.path.exists(local_meta):
-                meta_df = pd.read_csv(local_meta, index_col=0)
-                break
-        if meta_df is None:
-            raise FileNotFoundError("Metadata table not found for morphology features.")
-
-    common_cells = df_raw.index.intersection(meta_df.index)
+    common_cells = meta_df.index.intersection(df_rna.index)
     if len(common_cells) == 0:
-        print("Warning: No exact cell barcode overlap between RNA matrix and metadata. Aligning by index length.")
-        min_len = min(len(df_raw), len(meta_df))
-        df_raw = df_raw.iloc[:min_len]
-        meta_df = meta_df.iloc[:min_len]
-        common_cells = df_raw.index
+        raise ValueError("No overlapping cell barcodes found between QC metadata and expression matrices.")
 
-    df_raw = df_raw.loc[common_cells]
-    meta_df = meta_df.loc[common_cells]
+    df_rna = df_rna.loc[common_cells].copy()
+    meta_df = meta_df.loc[common_cells].copy()
+    cohort_sources = cohort_sources.loc[common_cells].copy()
 
-    # Select HVGs (default: variance on CP10K + log1p normalized expression) after optional min_cells_per_gene filter,
-    # then extract the corresponding genes from the raw count matrix
-    from hvg_utils import resolve_hvg_method, select_hvgs
+    img_df = corr_mod.extract_morphology_features(meta_df)
 
-    method = resolve_hvg_method(hvg_method, default_method="log1p_var")
-    top_genes = select_hvgs(
-        df_raw,
-        n_hvg=n_hvg,
-        hvg_method=method,
-        min_cells_per_gene=min_cells_per_gene,
+    # Multi-cohort RNA from load_expression_backwards_compatible is already z-scored (Gaussian)
+    effective_rna_likelihood = rna_likelihood
+    is_prescaled = bool((df_rna.values < 0).any())
+    if is_prescaled or adjust_library_depth:
+        if rna_likelihood != "gaussian":
+            reason = "library-depth residualization" if adjust_library_depth else "multi-cohort z-scored HDF5 + 10x alignment"
+            print(f"[MOFA2] Notice: Switching RNA likelihood '{rna_likelihood}' -> 'gaussian' ({reason}).")
+            effective_rna_likelihood = "gaussian"
+
+    # Harmonize morphology across cohorts and optionally residualize per-cell library depth (Finak et al., 2015)
+    df_rna_h, img_df_h = corr_mod.harmonize_and_adjust_modalities(
+        df_rna, img_df, cohort_sources, adjust_library_depth=adjust_library_depth
     )
-    df_rna_hvg = df_raw[top_genes]
+    if adjust_library_depth:
+        print("[MOFA2] Applied per-cohort library-depth / CDR residualization to RNA view (Finak et al., 2015).")
 
-    img_df = extract_morphology_features(meta_df)
+    if effective_rna_likelihood == "gaussian":
+        scaler_rna = StandardScaler()
+        proc_rna = pd.DataFrame(
+            scaler_rna.fit_transform(df_rna_h),
+            index=df_rna_h.index,
+            columns=df_rna_h.columns,
+        )
+        print("RNA view prepared for 'gaussian' likelihood: cohort-harmonized z-scores.")
+    else:
+        proc_rna = normalize_rna_for_likelihood(
+            df_rna_h,
+            likelihood=effective_rna_likelihood,
+            rna_norm=rna_norm
+        )
 
-    # Normalize each view according to its target likelihood
-    proc_rna = normalize_rna_for_likelihood(
-        df_rna_hvg,
-        likelihood=rna_likelihood,
-        rna_norm=rna_norm
-    )
     proc_img = normalize_morphology_for_likelihood(
-        img_df,
+        img_df_h,
         likelihood=morph_likelihood,
         log_morph=log_morph
     )
@@ -275,7 +288,14 @@ def prepare_mofa_input_matrices(
     else:
         mouse_series = pd.Series("Unknown", index=common_cells)
 
-    return proc_rna, proc_img, supervised_ploidy, mouse_series
+    n_mice = mouse_series[mouse_series != "Unknown"].nunique()
+    print(
+        f"[MOFA2 Data] Loaded {len(common_cells)} aligned QC-passed cells"
+        + (f" across {n_mice} animals" if n_mice else "")
+        + f" | {proc_rna.shape[1]} genes | {proc_img.shape[1]} morphology features."
+    )
+
+    return proc_rna, proc_img, supervised_ploidy, mouse_series, effective_rna_likelihood
 
 
 def run_mofa_training(
@@ -775,6 +795,17 @@ def main():
         help="Apply signed log1p transform to Morphology features before StandardScaler"
     )
     parser.add_argument(
+        "--mofa_hdf5",
+        type=str,
+        default=None,
+        help="Optional pre-saved MOFA HDF5 path for M1-M5 expression alignment (auto-discovered in data/ if omitted)"
+    )
+    parser.add_argument(
+        "--adjust_library_depth",
+        action="store_true",
+        help="Apply per-cohort library-depth / Cellular Detection Rate (CDR) residualization to RNA view (Finak et al., 2015)"
+    )
+    parser.add_argument(
         "--reuse_model",
         action="store_true",
         help="Reuse existing HDF5 model file if present instead of retraining"
@@ -808,9 +839,10 @@ def main():
             f"Please run Step 1 first:\n"
             f"  python run_master_analysis.py --step qc --out_dir \"{args.out_dir}\""
         )
-    proc_rna, proc_img, ploidy_series, mouse_series = prepare_mofa_input_matrices(
+    proc_rna, proc_img, ploidy_series, mouse_series, effective_rna_likelihood = prepare_mofa_input_matrices(
         args.exp_dir,
         qc_meta_path,
+        mofa_hdf5_path=args.mofa_hdf5,
         n_hvg=args.n_hvg,
         hvg_method=args.hvg_method,
         min_cells_per_gene=args.min_cells_per_gene,
@@ -818,6 +850,7 @@ def main():
         morph_likelihood=args.morph_likelihood,
         rna_norm=args.rna_norm,
         log_morph=args.log_morph,
+        adjust_library_depth=args.adjust_library_depth,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,
         exclude_genes=args.exclude_genes,
@@ -840,7 +873,7 @@ def main():
                 proc_img,
                 output_hdf5=model_hdf5,
                 factors=k,
-                rna_likelihood=args.rna_likelihood,
+                rna_likelihood=effective_rna_likelihood,
                 morph_likelihood=args.morph_likelihood
             )
 
@@ -852,7 +885,7 @@ def main():
             proc_rna=proc_rna,
             proc_img=proc_img,
             mouse_series=mouse_series,
-            rna_likelihood=args.rna_likelihood,
+            rna_likelihood=effective_rna_likelihood,
             morph_likelihood=args.morph_likelihood,
             factors_k=k,
         )

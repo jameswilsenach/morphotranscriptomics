@@ -30,19 +30,22 @@ This runbook provides a standard operating procedure for evaluating **MOFA2 late
 
 ## 3. Standard Execution Commands
 
-### A. Recommended Multi-Factor Sweep (`K = 5, 10, 15`, Default Likelihoods)
-Runs MOFA2 with `rna_likelihood=poisson` and `morph_likelihood=gaussian` across $K \in \{5, 10, 15\}$:
+### A. Recommended Multi-Factor Sweep (`K = 5, 10, 15`, Full 393-Cell Cohort `M1`–`M7`)
+Runs MOFA2 across all `393` aligned QC-passed cells (`M1`–`M7`, automatically switching RNA likelihood to `gaussian` when combining multi-cohort HDF5 + 10x matrices, or using `poisson` when raw 10x counts are available for all cells):
 
 ```powershell
 python run_master_analysis.py --step mofa --mofa_factors "5,10,15" --out_dir "figures"
 ```
 
-### B. Direct Step 5 Invocation (with Custom Options)
-If you want to compare against a Gaussian RNA baseline (matching the original notebook's z-scored RNA formulation) or reuse existing HDF5 models to regenerate plots only:
+### B. Full-Cohort Step 5b MVAE & Sensitivity Checks (Unadjusted vs. Library-Depth Adjusted)
+To compare **unadjusted** (global RNA depth retained) against **library-depth / CDR residualized** (Finak et al., 2015, *Genome Biology* 16:278), and to run the companion PyTorch MVAE on the exact same `393` cells:
 
 ```powershell
-# Gaussian RNA sensitivity check across K = 5, 10, 15:
-python 05_mofa_multimodal_analysis.py --out_dir "output_mofa_gaussian" --factors "5,10,15" --rna_likelihood gaussian
+# MOFA2 with library-depth / CDR residualization (Finak et al., 2015):
+python 05_mofa_multimodal_analysis.py --out_dir "output_mofa_depth_adj" --factors "5,10,15" --adjust_library_depth
+
+# Full-cohort (393 cells) PyTorch MVAE (Step 5b) for joint & cross-modal latent modeling:
+python run_master_analysis.py --step mvae --out_dir "figures"
 
 # Cell-cycle gene exclusion sensitivity check across K = 5, 10, 15:
 python run_master_analysis.py --step mofa --mofa_factors "5,10,15" --exclude_cell_cycle --out_dir "output_mofa_no_cc"

@@ -222,6 +222,9 @@ In standard proliferating diploid scRNA-seq workflows, Seurat's **Cell-Cycle Sco
 
 **Why this pipeline uses explicit gene-list filtering instead of diploid phase regression**: Megakaryocytes undergo **endomitosis** (aborted mitosis without cytokinesis to reach $4\text{n}$–$32\text{n}+$ ploidy). Applying diploid mitotic phase classifiers (`G1`/`S`/`G2M`) or regressing out `S.Score`/`G2M.Score` risks over-specifying endomitotic states and inadvertently removing genuine polyploidization biology (Luecken & Theis, 2019, *Molecular Systems Biology* 15(6):e8746, DOI: [10.15252/msb.20188746](https://doi.org/10.15252/msb.20188746)). Instead, this pipeline keeps the original unfiltered baseline by default and offers transparent, reproducible gene-list exclusion with per-step audit logs (`*_excluded_genes_audit.csv`).
 
+### Library-Depth / Cellular Detection Rate (CDR) Adjustment
+In megakaryocyte index-sorting, larger polyploid cells (`16n`, `32n`) exhibit lower total mapped read counts / higher dropout ($\text{Spearman}(\text{lib\_size}, \text{Size}) \approx -0.54$). Because global RNA complexity may reflect either genuine maturation-associated transcriptional specialization or technical capture/shearing bias, the pipeline supports comparing **unadjusted** expression alongside **per-cohort library-depth / Cellular Detection Rate (CDR) residualization** (regressing per-cell mean standardized expression out of each gene and re-standardizing, following the CDR covariate adjustment framework of **Finak et al., 2015**, *Genome Biology* 16:278, DOI: [10.1186/s13059-015-0844-5](https://doi.org/10.1186/s13059-015-0844-5)).
+
 ---
 
 ## 🔄 Backwards Compatibility with Legacy Datasets
