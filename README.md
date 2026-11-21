@@ -90,6 +90,7 @@ Exploration_Data/
 ├── 04_mofa_multimodal_analysis.py          # Step 4: Multi-Omics Factor Analysis (MOFA)
 ├── 04b_mvae_multimodal_analysis.py         # Step 4b: PyTorch Multimodal VAE (MVAE)
 ├── 05_pathway_enrichment.py                # Step 5: Pathway enrichment (gseapy) & WordCloud
+├── 06_morphology_gene_correlations.py      # Step 6: Spearman morphology-to-gene correlations & scatter grids
 └── run_master_analysis.py                  # Master CLI Pipeline Runner
 ```
 
@@ -179,6 +180,48 @@ Exploration_Data/
 
 ---
 
+### Step 6: Morphology-to-Gene Spearman Rank Correlations
+**Script**: [`06_morphology_gene_correlations.py`](file:///c:/Users/vilsn/Documents/morphotranscriptomics/06_morphology_gene_correlations.py)
+
+- **What it does for the biologist**: Computes robust pairwise **Spearman rank correlations ($\rho$)**, Benjamini–Hochberg FDR ($q$-values), and partial Spearman correlations controlling for $\log_2(\text{Ploidy})$ between all expressed genes and imaging flow cytometry morphology parameters across all 393 QC-passed cells (M1–M7), while remaining backwards-compatible with legacy single-cohort datasets (`--legacy_split` or `--cohort 10plate` / `--cohort 4plate`).
+- **Optional Gene Filtering**: Supports `--exclude_cell_cycle`, `--exclude_genes_file`, and `--exclude_genes` prior to library-depth adjustment and Spearman correlation testing, writing `output/06_excluded_genes_audit.csv` when filtering is enabled.
+- **Outputs**:
+  - `output/06_top_gene_morphology_spearman_scatter_grid.png`: 12-panel scatter & regression grid of top positively/negatively correlated gene–morphology pairs colored by `Supervised_ploidy`.
+  - `output/06_gene_morphology_spearman_ranking_labeled.png`: Two-panel volcano & ranked bar chart labeling genes with particularly high Spearman $|\rho|$ and key megakaryocyte markers (`Ppbp`, `Pde3a`, `Mylk`, `Kalrn`, `Rock1`, `Exoc6`, `Pf4`, `Itga2b`).
+  - `output/06_morphology_gene_spearman_heatmap.png`: Hierarchically clustered Spearman correlation matrix across top genes and morphology features.
+  - `output/morphology_gene_spearman_top_pairs.csv` & `output/morphology_gene_spearman_per_gene_summary.csv`: Full tabular correlation statistics.
+  - `output/06_excluded_genes_audit.csv`: Audit log of excluded genes and provenance (created when filtering is enabled).
+
+---
+
+## 🔬 Cell Cycle Gene Lists & Phase Regression Methodology (Citations)
+
+This pipeline provides optional, auditable cell-cycle gene filtering via [`cell_cycle.py`](file:///c:/Users/vilsn/Documents/morphotranscriptomics/cell_cycle.py) across **Steps 2, 3, 4, 4b, and 6** (`--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`, `--exclude_steps`).
+
+### Cited Seurat Cell-Cycle Gene Lists
+- **Tirosh et al. (2016) / Seurat `cc.genes`**: Canonical human cell-cycle gene signature comprising **43 S-phase** and **54 G2/M-phase** markers (97 genes total) derived from single-cell RNA-seq of proliferating cells (Tirosh et al., 2016, *Science* 352(6282):189–196, DOI: [10.1126/science.aad0501](https://doi.org/10.1126/science.aad0501)).
+- **Seurat `cc.genes.updated.2019`**: Updated HGNC gene symbols introduced in Seurat v3 (Butler et al., 2018, *Nature Biotechnology* 36:411–420, DOI: [10.1038/nbt.4096](https://doi.org/10.1038/nbt.4096); Stuart et al., 2019, *Cell* 177(7):1888–1902, DOI: [10.1016/j.cell.2019.05.031](https://doi.org/10.1016/j.cell.2019.05.031)). In `cell_cycle.py`, all 97 canonical mouse ortholog symbols (`TIROSH_2016_S_GENES_MOUSE`, `TIROSH_2016_G2M_GENES_MOUSE`) plus **6 legacy GRCm38/Tirosh aliases** (`Mlf1ip`→`Cenpu`, `Rpa2`→`Polr1b`, `Brip1`→`Mrpl36`, `Mcm2`→`Mcm7`, `Fam64a`→`Pimreg`, `Hn1`→`Jpt1`) are matched case-insensitively to prevent silent misses across older and newer genome annotations.
+
+### Standard Seurat Phase Scoring & Regression Procedures vs. Endomitotic Megakaryocytes
+In standard proliferating diploid scRNA-seq workflows, Seurat's **Cell-Cycle Scoring and Regression** procedure (Satija Lab vignette; Butler et al., 2018; Stuart et al., 2019) proceeds in two stages:
+1. **Scoring & Discrete Phase Assignment**: `CellCycleScoring(s.features = cc.genes.updated.2019$s.genes, g2m.features = cc.genes.updated.2019$g2m.genes)` computes continuous `S.Score` and `G2M.Score` module scores per cell and assigns discrete `G1`, `S`, or `G2M` phases.
+2. **Linear Phase Regression**:
+   - *Full cell-cycle removal*: `ScaleData(vars.to.regress = c("S.Score", "G2M.Score"))` regresses out both S and G2/M scores to remove all cell-cycle variance.
+   - *Difference-score regression (alternate workflow)*: `CC.Difference <- S.Score - G2M.Score` followed by `ScaleData(vars.to.regress = "CC.Difference")` removes phase differences among actively cycling cells while preserving separation between quiescent (`G1`) and cycling cells.
+
+**Why this pipeline uses explicit gene-list filtering instead of diploid phase regression**: Megakaryocytes undergo **endomitosis** (aborted mitosis without cytokinesis to reach $4\text{n}$–$32\text{n}+$ ploidy). Applying diploid mitotic phase classifiers (`G1`/`S`/`G2M`) or regressing out `S.Score`/`G2M.Score` risks over-specifying endomitotic states and inadvertently removing genuine polyploidization biology (Luecken & Theis, 2019, *Molecular Systems Biology* 15(6):e8746, DOI: [10.15252/msb.20188746](https://doi.org/10.15252/msb.20188746)). Instead, this pipeline keeps the original unfiltered baseline by default and offers transparent, reproducible gene-list exclusion with per-step audit logs (`*_excluded_genes_audit.csv`).
+
+---
+
+## 🔄 Backwards Compatibility with Legacy Datasets
+
+Both Step 1 (`01_qc_and_metadata_filtering.py`) and Step 6 (`06_morphology_gene_correlations.py`) retain full backwards compatibility with legacy Train/Pilot 2-dataset splits and older metadata schemas:
+- **Legacy Split Mode**: Pass `--legacy_split` to `run_master_analysis.py` or `01_qc_and_metadata_filtering.py` to ingest legacy Train (`Metadata_flow+well_id+supervised_ploidy.csv`, `meta.contaminant.2.tsv` / `meta.contaminant.v1.csv`) and Pilot (`meta.v1+flowSF.csv`) directories instead of the unified `Metadata_merged_YL_SF_20.10.26_v2.csv`.
+- **Legacy Column & Ploidy Normalization**: Automatically harmonizes older column conventions (`Well_ID`/`Well`/`Barcode`, `Mouse_Plate`/`Sample_Plate`/`orig.ident`, `Supervised_Ploidy_Images`/`Estimated_Ploidy_D.NA.A`, `kallisto_mapped`/`kallisto_mappe_pc`) and ploidy casing (`2N`–`32N` → `2n`–`32n`).
+- **Cohort Selection in Step 6**: Use `--cohort 10plate` (M1–M5), `--cohort 4plate` (M6–M7), or `--metadata_file <legacy_csv_or_tsv>` directly.
+
+---
+
 ## 🚀 How to Run the Master Pipeline
 
 You can run the entire pipeline end-to-end or individual steps using **`run_master_analysis.py`**:
@@ -207,6 +250,13 @@ python 03_dimensionality_reduction.py --exclude_genes_file "go_0007049.txt"
 python 04_mofa_multimodal_analysis.py --exclude_cell_cycle --exclude_genes "Mki67,Top2a"
 python 04b_mvae_multimodal_analysis.py --exclude_cell_cycle
 python 02_gene_expression_rankings.py --exclude_cell_cycle
+python 06_morphology_gene_correlations.py --exclude_cell_cycle
+
+# Run backwards-compatible legacy Train/Pilot 2-dataset split:
+python run_master_analysis.py --legacy_split --out_dir "output_legacy"
+
+# Run Step 6 (Morphology-to-Gene Spearman Correlations) with cell-cycle exclusion:
+python run_master_analysis.py --step 6 --exclude_cell_cycle --out_dir "output_no_cc"
 
 # Run only Step 1 (Quality Control):
 python run_master_analysis.py --step 1
@@ -242,5 +292,11 @@ python leave_one_animal_out_cv.py
 | `04b_mvae_latent_space_umap.png` | MVAE PoE latent space UMAP by ploidy | Step 4b |
 | `05_pathway_enrichment_dotplot.png` | Enrichr biological pathway dotplot | Step 5 |
 | `05_pathway_wordcloud.png` | Biological pathway WordCloud | Step 5 |
+| `06_top_gene_morphology_spearman_scatter_grid.png` | 12-panel scatter & regression grid of top gene–morphology Spearman pairs | Step 6 |
+| `06_gene_morphology_spearman_ranking_labeled.png` | Volcano & ranked gene bar chart highlighting top Spearman $|\rho|$ & MK markers | Step 6 |
+| `06_morphology_gene_spearman_heatmap.png` | Hierarchically clustered gene–morphology Spearman correlation matrix | Step 6 |
+| `morphology_gene_spearman_top_pairs.csv` | Top 500 pairwise Spearman $\rho$, BH-FDR $q$, and partial $\rho\mid\text{ploidy}$ | Step 6 |
+| `morphology_gene_spearman_per_gene_summary.csv` | Per-gene strongest morphology correlation summary | Step 6 |
+| `*_excluded_genes_audit.csv` | Audit log of excluded cell-cycle / custom genes & citations (when enabled) | Steps 2–4b, 6 |
 
 ---

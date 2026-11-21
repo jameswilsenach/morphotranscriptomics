@@ -149,40 +149,59 @@ def normalize_metadata(df, dataset_name="Combined"):
     return df
 
 
-def load_metadata_sources(metadata_file=None, train_dir=r"D:\Morphotranscriptomic_Data", test_dir="exp"):
+def load_metadata_sources(
+    metadata_file=None,
+    train_dir=r"D:\Morphotranscriptomic_Data",
+    test_dir="exp",
+    legacy_split=False
+):
     """
     Loads metadata preferring the unified multi-animal file (Metadata_merged_YL_SF_20.10.26_v2.csv)
-    or falls back to legacy Train and Test/Pilot directories.
+    or falls back to legacy Train and Test/Pilot directories when legacy_split=True or unified file is absent.
     """
-    # 1. Check direct unified metadata path
-    candidate_paths = []
-    if metadata_file:
-        candidate_paths.append(metadata_file)
-    candidate_paths.extend([
-        r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\Metadata_merged_YL_SF_20.10.26_v2.csv",
-        "Metadata_merged_YL_SF_20.10.26_v2.csv",
-        os.path.join(train_dir, "Metadata_merged_YL_SF_20.10.26_v2.csv"),
-    ])
+    # 1. Check direct unified metadata path unless legacy_split is explicitly requested
+    if not legacy_split:
+        candidate_paths = []
+        if metadata_file:
+            candidate_paths.append(metadata_file)
+        candidate_paths.extend([
+            r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\Metadata_merged_YL_SF_20.10.26_v2.csv",
+            "Metadata_merged_YL_SF_20.10.26_v2.csv",
+            os.path.join(train_dir, "Metadata_merged_YL_SF_20.10.26_v2.csv"),
+        ])
 
-    for path in candidate_paths:
-        if path and os.path.exists(path):
-            print(f"[Metadata] Loading unified cross-cohort metadata file: {os.path.abspath(path)}")
-            merged_df = pd.read_csv(path)
-            norm_df = normalize_metadata(merged_df, dataset_name="Combined_Cohort")
-            return norm_df
+        for path in candidate_paths:
+            if path and os.path.exists(path):
+                print(f"[Metadata] Loading unified cross-cohort metadata file: {os.path.abspath(path)}")
+                sep = "\t" if path.lower().endswith(".tsv") else ","
+                merged_df = pd.read_csv(path, sep=sep)
+                norm_df = normalize_metadata(merged_df, dataset_name="Combined_Cohort")
+                return norm_df
+    elif metadata_file and os.path.exists(metadata_file):
+        print(f"[Metadata] Loading specified legacy metadata file: {os.path.abspath(metadata_file)}")
+        sep = "\t" if metadata_file.lower().endswith(".tsv") else ","
+        legacy_df = pd.read_csv(metadata_file, sep=sep)
+        return normalize_metadata(legacy_df, dataset_name="Legacy")
 
     # 2. Legacy fallback: separate Train and Pilot directories
-    print("[Metadata] Unified file not found. Falling back to multi-file directory ingestion...")
+    print("[Metadata] Using legacy multi-file Train / Pilot directory ingestion...")
     metadata_frames = []
 
     train_meta_path = os.path.join(train_dir, "Metadata_flow+well_id+supervised_ploidy.csv")
     train_contam_path = os.path.join(train_dir, "expression", "meta.contaminant.2.tsv")
 
-    if not os.path.exists(train_contam_path) and os.path.exists("meta.contaminant.2.tsv"):
-        train_contam_path = "meta.contaminant.2.tsv"
+    for fallback_contam in [
+        "meta.contaminant.2.tsv",
+        "meta.contaminant.v1.csv",
+        r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\meta.contaminant.v1.csv"
+    ]:
+        if not os.path.exists(train_contam_path) and os.path.exists(fallback_contam):
+            train_contam_path = fallback_contam
+            break
 
     if os.path.exists(train_contam_path):
-        train_contam_df = pd.read_csv(train_contam_path, sep="\t")
+        sep = "\t" if train_contam_path.lower().endswith(".tsv") else ","
+        train_contam_df = pd.read_csv(train_contam_path, sep=sep)
         norm_train_contam = normalize_metadata(train_contam_df, dataset_name="Train")
 
         if os.path.exists(train_meta_path):
@@ -201,11 +220,16 @@ def load_metadata_sources(metadata_file=None, train_dir=r"D:\Morphotranscriptomi
         else:
             metadata_frames.append(norm_train_contam)
 
-    local_meta_path = "meta.v1+flowSF.csv"
-    if os.path.exists(local_meta_path):
-        local_df = pd.read_csv(local_meta_path)
-        norm_local = normalize_metadata(local_df, dataset_name="Pilot/Test")
-        metadata_frames.append(norm_local)
+    for local_meta_path in [
+        "meta.v1+flowSF.csv",
+        os.path.join(test_dir, "meta.v1+flowSF.csv"),
+        r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\meta.v1+flowSF.csv"
+    ]:
+        if os.path.exists(local_meta_path):
+            local_df = pd.read_csv(local_meta_path)
+            norm_local = normalize_metadata(local_df, dataset_name="Pilot/Test")
+            metadata_frames.append(norm_local)
+            break
 
     if not metadata_frames:
         raise FileNotFoundError(f"No valid metadata files found in candidate paths, {train_dir}, or {test_dir}.")
@@ -319,6 +343,7 @@ def main():
     parser.add_argument("--train_dir", type=str, default=r"D:\Morphotranscriptomic_Data", help="Path to main Train data directory")
     parser.add_argument("--test_dir", type=str, default="exp", help="Path to local Test/Pilot expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output CSVs and plots")
+    parser.add_argument("--legacy_split", action="store_true", help="Force legacy Train/Pilot 2-dataset split ingestion for backwards compatibility")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -326,9 +351,15 @@ def main():
     print(f"Metadata file  : {args.metadata_file}")
     print(f"Train directory: {args.train_dir}")
     print(f"Test directory : {args.test_dir}")
+    print(f"Legacy split   : {args.legacy_split}")
 
     # Load and harmonize metadata
-    meta_df = load_metadata_sources(metadata_file=args.metadata_file, train_dir=args.train_dir, test_dir=args.test_dir)
+    meta_df = load_metadata_sources(
+        metadata_file=args.metadata_file if not args.legacy_split else None,
+        train_dir=args.train_dir,
+        test_dir=args.test_dir,
+        legacy_split=args.legacy_split
+    )
     print(f"Total raw metadata records loaded: {len(meta_df)}")
 
     # Apply QC filters

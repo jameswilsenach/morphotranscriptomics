@@ -4,22 +4,26 @@ run_master_analysis.py
 Master orchestration script for the Single Cell Morphotranscriptomics Project handover.
 
 Runs the complete pipeline end-to-end or individual analysis stages cleanly via CLI:
-  Step 1: 01_qc_and_metadata_filtering.py     (Quality Control & Multi-Animal metadata harmonization)
+  Step 1: 01_qc_and_metadata_filtering.py     (Quality Control & Multi-Animal / Legacy metadata harmonization)
   Step 2: 02_gene_expression_rankings.py     (Vectorized gene expression lookup & FCS/CVW mapping)
   Step 3: 03_dimensionality_reduction.py     (Scanpy/AnnData HVG selection, PCA, & UMAP embedding)
   Step 4: 04_mofa_multimodal_analysis.py     (Multi-Omics Factor Analysis integration)
   Step 5: 05_pathway_enrichment.py           (Pathway enrichment dotplots & WordCloud visualization)
+  Step 6: 06_morphology_gene_correlations.py (Morphology-to-gene Spearman rank correlation scatter grid & gene rankings)
   Step CV: leave_one_animal_out_cv.py        (Leave-One-Animal-Out Cross-Validation across all mice)
 
 Usage Examples:
+    # Run Morphology-to-Gene Spearman Correlation Analysis:
+    python run_master_analysis.py --step 6
+
     # Run Leave-One-Animal-Out Cross-Validation:
     python run_master_analysis.py --step cv
 
     # Run full pipeline end-to-end including LOAOCV:
     python run_master_analysis.py --loaocv --out_dir "output"
 
-    # Run specific step (e.g. Step 1 QC filtering only):
-    python run_master_analysis.py --step 1
+    # Run backwards-compatible legacy Train/Pilot split:
+    python run_master_analysis.py --legacy_split --out_dir "output_legacy"
 """
 
 import argparse
@@ -55,8 +59,9 @@ def main():
     parser.add_argument("--test_dir", type=str, default="exp", help="Path to local Test/Pilot expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save generated CSVs and figures")
     parser.add_argument("--gene", type=str, default="kalrn", help="Target gene symbol for expression rankings (default: kalrn)")
-    parser.add_argument("--step", type=str, default="all", choices=["all", "1", "2", "3", "4", "5", "cv"], help="Specific step to run, 'cv' for LOAOCV, or 'all'")
+    parser.add_argument("--step", type=str, default="all", choices=["all", "1", "2", "3", "4", "5", "6", "cv"], help="Specific step to run, '6' for correlations, 'cv' for LOAOCV, or 'all'")
     parser.add_argument("--loaocv", action="store_true", help="Enable Leave-One-Animal-Out Cross-Validation stage")
+    parser.add_argument("--legacy_split", action="store_true", help="Force legacy Train/Pilot 2-dataset split ingestion for backwards compatibility")
     parser.add_argument(
         "--rna_likelihood",
         type=str,
@@ -92,7 +97,7 @@ def main():
         "--exclude_steps",
         type=str,
         default="all",
-        help="Analyses to apply gene exclusions to: 'all' (default) or comma-separated steps (e.g. '3', '4', '3,4')"
+        help="Analyses to apply gene exclusions to: 'all' (default: 2,3,4,4b,6) or comma-separated steps (e.g. '3', '6', '3,4,6')"
     )
 
     args = parser.parse_args()
@@ -102,7 +107,7 @@ def main():
 
     # Determine which steps receive gene exclusion flags
     if args.exclude_steps.lower() in ["all", "*"]:
-        exclude_active_steps = {"2", "3", "4", "4b"}
+        exclude_active_steps = {"2", "3", "4", "4b", "6"}
     else:
         exclude_active_steps = {s.strip().lower() for s in args.exclude_steps.split(",")}
 
@@ -130,6 +135,7 @@ def main():
     print(f" Target Gene       : {args.gene}")
     print(f" Target Step       : {args.step}")
     print(f" LOAOCV Enabled    : {args.loaocv or args.step == 'cv'}")
+    print(f" Legacy Split Mode : {args.legacy_split}")
     if any_exclusion:
         print(f" Exclude Cell Cycle: {args.exclude_cell_cycle}")
         if args.exclude_genes_file:
@@ -158,6 +164,8 @@ def main():
             "--test_dir", args.test_dir,
             "--out_dir", args.out_dir
         ]
+        if args.legacy_split:
+            cmd.append("--legacy_split")
         run_command(cmd)
 
     # Step 2: Gene Expression Rankings & FCS/CVW Cell Mapping
@@ -201,6 +209,19 @@ def main():
             "--gene_list", f"{args.gene.upper()},PF4,RUNX1,ITGA2B,MPL,FLI1,GATA1,NFE2",
             "--out_dir", args.out_dir
         ]
+        run_command(cmd)
+
+    # Step 6: Morphology-to-Gene Spearman Rank Correlations
+    if args.step in ["all", "6"]:
+        print("\n>>> STEP 6: Morphology-to-Gene Spearman Rank Correlation Analysis")
+        cmd = append_exclusion_flags([
+            python_exe, "06_morphology_gene_correlations.py",
+            "--qc_meta", os.path.join(args.out_dir, "qc_filtered_metadata.csv"),
+            "--exp_dir", exp_train_dir,
+            "--train_dir", args.train_dir,
+            "--test_dir", args.test_dir,
+            "--out_dir", args.out_dir
+        ], "6")
         run_command(cmd)
 
     # Step CV: Leave-One-Animal-Out Cross-Validation (LOAOCV)
