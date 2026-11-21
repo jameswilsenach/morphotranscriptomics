@@ -156,6 +156,7 @@ def extract_morphology_features(meta_df):
 def load_mvae_data(
     exp_dir,
     qc_meta_path,
+    mofa_hdf5_path=None,
     n_hvg=2000,
     hvg_method="default",
     min_cells_per_gene=0,
@@ -164,84 +165,86 @@ def load_mvae_data(
     exclude_genes=None,
     out_dir=None,
 ):
-    """Ingests and standardizes RNA and Morphology matrices for MVAE training."""
-    import scanpy as sc
-    from hvg_utils import resolve_hvg_method, select_hvgs
+    """
+    Ingests, aligns, and standardizes RNA and Morphology matrices across all available
+    QC-passed cells (e.g. all 393 cells across M1-M7 by combining 10x matrices and
+    pre-saved MOFA HDF5 expression when needed).
+    """
+    from importlib import import_module
+    corr_mod = import_module("04_morphology_gene_correlations")
 
-    if not os.path.exists(exp_dir):
-        for fallback in [os.path.join("data", "exp"), "exp"]:
-            if os.path.exists(fallback):
-                exp_dir = fallback
+    # QC Metadata
+    if qc_meta_path and os.path.exists(qc_meta_path):
+        meta_df = pd.read_csv(qc_meta_path, index_col=0)
+        if "SampleID" not in meta_df.columns:
+            meta_df["SampleID"] = meta_df.index.astype(str)
+        meta_df.index = meta_df.index.astype(str)
+    else:
+        meta_df = None
+        for local_meta in [os.path.join("data", "meta.v1+flowSF.csv"), "meta.v1+flowSF.csv"]:
+            if os.path.exists(local_meta):
+                meta_df = pd.read_csv(local_meta, index_col=0)
+                meta_df.index = meta_df.index.astype(str)
                 break
+        if meta_df is None:
+            raise FileNotFoundError("Metadata table not found for MVAE training.")
 
-    adata = sc.read_10x_mtx(exp_dir)
-    adata.var_names_make_unique()
-
-    # Filter genes
-    is_ribo = adata.var_names.str.startswith(('Rps', 'Rpl'))
-    is_unnamed = adata.var_names.str.startswith('Unnamed')
-    adata = adata[:, ~(is_ribo | is_unnamed)].copy()
+    # Load barcode-aligned expression across all available cohorts (10x + MOFA HDF5 fallback)
+    df_rna, cohort_sources = corr_mod.load_expression_backwards_compatible(
+        meta_df,
+        exp_dir=exp_dir,
+        pilot_exp_dir=os.path.join("data", "exp"),
+        mofa_hdf5_path=mofa_hdf5_path,
+        n_hvg=n_hvg,
+        hvg_method=hvg_method,
+        min_cells_per_gene=min_cells_per_gene,
+    )
 
     # Optional cited cell-cycle and/or custom gene exclusion
     if exclude_cell_cycle or exclude_genes_file or exclude_genes:
         from cell_cycle import filter_excluded_genes
         audit_path = os.path.join(out_dir, "05b_mvae_excluded_genes_audit.csv") if out_dir else None
         keep_mask, _ = filter_excluded_genes(
-            adata.var_names,
+            df_rna.columns,
             exclude_cell_cycle=exclude_cell_cycle,
             exclude_genes_file=exclude_genes_file,
             exclude_genes=exclude_genes,
             audit_csv_path=audit_path,
         )
-        adata = adata[:, keep_mask].copy()
+        df_rna = df_rna.loc[:, keep_mask].copy()
     else:
         print("[Gene Filter] MVAE RNA View: No additional gene exclusions applied (baseline).")
 
-    df_raw = adata.to_df()
-
-    # QC Metadata
-    if qc_meta_path and os.path.exists(qc_meta_path):
-        meta_df = pd.read_csv(qc_meta_path, index_col=0)
-    else:
-        meta_df = None
-        for local_meta in [os.path.join("data", "meta.v1+flowSF.csv"), "meta.v1+flowSF.csv"]:
-            if os.path.exists(local_meta):
-                meta_df = pd.read_csv(local_meta, index_col=0)
-                break
-        if meta_df is None:
-            raise FileNotFoundError("Metadata table not found for MVAE training.")
-
-    common_cells = df_raw.index.intersection(meta_df.index)
+    common_cells = meta_df.index.intersection(df_rna.index)
     if len(common_cells) == 0:
-        min_len = min(len(df_raw), len(meta_df))
-        df_raw = df_raw.iloc[:min_len]
-        meta_df = meta_df.iloc[:min_len]
-        common_cells = df_raw.index
+        raise ValueError("No overlapping cell barcodes found between QC metadata and expression matrices.")
 
-    df_raw = df_raw.loc[common_cells]
-    meta_df = meta_df.loc[common_cells]
+    df_rna = df_rna.loc[common_cells].copy()
+    meta_df = meta_df.loc[common_cells].copy()
+    cohort_sources = cohort_sources.loc[common_cells].copy()
 
-    # HVG selection (default: raw_var) with optional min_cells_per_gene filter
-    method = resolve_hvg_method(hvg_method, default_method="raw_var")
-    top_genes = select_hvgs(
-        df_raw,
-        n_hvg=n_hvg,
-        hvg_method=method,
-        min_cells_per_gene=min_cells_per_gene,
+    img_df = corr_mod.extract_morphology_features(meta_df)
+
+    # Cohort-level z-score harmonization of morphology (matching multi-cohort RNA scaling)
+    df_rna_h, img_df_h = corr_mod.harmonize_and_adjust_modalities(
+        df_rna, img_df, cohort_sources, adjust_library_depth=False
     )
-    df_rna = df_raw[top_genes]
-
-    img_df = extract_morphology_features(meta_df)
 
     scaler_rna = StandardScaler()
-    scaled_rna = scaler_rna.fit_transform(df_rna)
+    scaled_rna = scaler_rna.fit_transform(df_rna_h)
 
     scaler_img = StandardScaler()
-    scaled_img = scaler_img.fit_transform(img_df)
+    scaled_img = scaler_img.fit_transform(img_df_h)
 
     ploidy_series = meta_df.get("Supervised_ploidy", pd.Series("Unknown", index=common_cells))
+    n_mice = meta_df["mouse"].nunique() if "mouse" in meta_df.columns else 0
+    print(
+        f"[MVAE Data] Loaded {len(common_cells)} aligned QC-passed cells"
+        + (f" across {n_mice} animals" if n_mice else "")
+        + f" | {df_rna_h.shape[1]} genes | {img_df_h.shape[1]} morphology features."
+    )
 
-    return scaled_rna, scaled_img, ploidy_series, df_rna.columns, img_df.columns, common_cells
+    return scaled_rna, scaled_img, ploidy_series, df_rna_h.columns, img_df_h.columns, common_cells
 
 
 def train_mvae(model, dataset, epochs=100, lr=1e-3, batch_size=32):
@@ -387,6 +390,7 @@ def generate_mvae_figures(model, x_rna_tensor, x_img_tensor, ploidy_series, cell
 def main():
     parser = argparse.ArgumentParser(description="05b: PyTorch Multimodal Variational Autoencoder (MVAE) Training & Reconstruction")
     parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
+    parser.add_argument("--mofa_hdf5", type=str, default=None, help="Optional pre-saved MOFA HDF5 path for M1-M5 expression alignment (auto-discovered in data/ if omitted)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--latent_dim", type=int, default=10, help="Dimension of latent space z")
@@ -441,6 +445,7 @@ def main():
     scaled_rna, scaled_img, ploidy_series, rna_cols, img_cols, cell_ids = load_mvae_data(
         args.exp_dir,
         qc_meta_path,
+        mofa_hdf5_path=args.mofa_hdf5,
         n_hvg=args.n_hvg,
         hvg_method=args.hvg_method,
         min_cells_per_gene=args.min_cells_per_gene,
