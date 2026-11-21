@@ -77,6 +77,37 @@ def main():
         help="Count normalization strategy for Poisson RNA likelihood in Step 4 (default: raw_counts)"
     )
     parser.add_argument(
+        "--min_mapped_reads",
+        type=int,
+        default=20000,
+        help="Minimum kallisto.nb_mapped reads per cell in Step 1 QC (default: 20000)"
+    )
+    parser.add_argument(
+        "--min_map_pc",
+        type=float,
+        default=50.0,
+        help="Minimum kallisto.pc_map mapping percentage per cell in Step 1 QC (default: 50.0)"
+    )
+    parser.add_argument(
+        "--min_cells_per_gene",
+        type=int,
+        default=0,
+        help="Minimum number of cells expressing a gene (> 0 counts) before HVG selection in Steps 3, 4, 6 (default: 0, disabled)"
+    )
+    parser.add_argument(
+        "--n_hvg",
+        type=int,
+        default=2000,
+        help="Number of highly variable genes to select in Steps 3, 4, 6 (default: 2000)"
+    )
+    parser.add_argument(
+        "--hvg_method",
+        type=str,
+        default="default",
+        choices=["default", "raw_var", "log1p_var", "seurat", "seurat_v3"],
+        help="HVG selection method in Steps 3, 4, 6 ('default' keeps each step's baseline method)"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes (97 genes + legacy aliases)"
@@ -136,6 +167,10 @@ def main():
     print(f" Target Step       : {args.step}")
     print(f" LOAOCV Enabled    : {args.loaocv or args.step == 'cv'}")
     print(f" Legacy Split Mode : {args.legacy_split}")
+    print(f" QC Min Reads      : > {args.min_mapped_reads}")
+    print(f" QC Min Map %      : > {args.min_map_pc}")
+    print(f" Min Cells / Gene  : {args.min_cells_per_gene}")
+    print(f" HVG Selection     : n_hvg={args.n_hvg}, method='{args.hvg_method}'")
     if any_exclusion:
         print(f" Exclude Cell Cycle: {args.exclude_cell_cycle}")
         if args.exclude_genes_file:
@@ -162,7 +197,9 @@ def main():
             "--metadata_file", args.metadata_file,
             "--train_dir", args.train_dir,
             "--test_dir", args.test_dir,
-            "--out_dir", args.out_dir
+            "--out_dir", args.out_dir,
+            "--min_mapped_reads", str(args.min_mapped_reads),
+            "--min_map_pc", str(args.min_map_pc),
         ]
         if args.legacy_split:
             cmd.append("--legacy_split")
@@ -186,6 +223,9 @@ def main():
             python_exe, "03_dimensionality_reduction.py",
             "--exp_dir", exp_train_dir,
             "--out_dir", args.out_dir,
+            "--n_hvg", str(args.n_hvg),
+            "--hvg_method", args.hvg_method,
+            "--min_cells_per_gene", str(args.min_cells_per_gene),
         ], "3")
         run_command(cmd)
 
@@ -198,6 +238,9 @@ def main():
             "--out_dir", args.out_dir,
             "--rna_likelihood", args.rna_likelihood,
             "--rna_norm", args.rna_norm,
+            "--n_hvg", str(args.n_hvg),
+            "--hvg_method", args.hvg_method,
+            "--min_cells_per_gene", str(args.min_cells_per_gene),
         ], "4")
         run_command(cmd)
 
@@ -220,7 +263,12 @@ def main():
             "--exp_dir", exp_train_dir,
             "--train_dir", args.train_dir,
             "--test_dir", args.test_dir,
-            "--out_dir", args.out_dir
+            "--out_dir", args.out_dir,
+            "--min_mapped_reads", str(args.min_mapped_reads),
+            "--min_map_pc", str(args.min_map_pc),
+            "--n_hvg", str(args.n_hvg),
+            "--hvg_method", args.hvg_method,
+            "--min_cells_per_gene", str(args.min_cells_per_gene),
         ], "6")
         run_command(cmd)
 
@@ -231,7 +279,9 @@ def main():
             python_exe, "leave_one_animal_out_cv.py",
             "--metadata_file", args.metadata_file,
             "--qc_meta", os.path.join(args.out_dir, "qc_filtered_metadata.csv"),
-            "--out_dir", args.out_dir
+            "--out_dir", args.out_dir,
+            "--min_mapped_reads", str(args.min_mapped_reads),
+            "--min_map_pc", str(args.min_map_pc),
         ]
         run_command(cmd)
 

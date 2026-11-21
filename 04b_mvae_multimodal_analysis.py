@@ -157,6 +157,8 @@ def load_mvae_data(
     exp_dir,
     qc_meta_path,
     n_hvg=2000,
+    hvg_method="default",
+    min_cells_per_gene=0,
     exclude_cell_cycle=False,
     exclude_genes_file=None,
     exclude_genes=None,
@@ -164,6 +166,7 @@ def load_mvae_data(
 ):
     """Ingests and standardizes RNA and Morphology matrices for MVAE training."""
     import scanpy as sc
+    from hvg_utils import resolve_hvg_method, select_hvgs
 
     if not os.path.exists(exp_dir) and os.path.exists("exp"):
         exp_dir = "exp"
@@ -195,11 +198,6 @@ def load_mvae_data(
 
     df_raw = adata.to_df()
 
-    # HVG selection
-    gene_vars = df_raw.var(axis=0)
-    top_genes = gene_vars.nlargest(n_hvg).index
-    df_rna = df_raw[top_genes]
-
     # QC Metadata
     if qc_meta_path and os.path.exists(qc_meta_path):
         meta_df = pd.read_csv(qc_meta_path, index_col=0)
@@ -210,15 +208,25 @@ def load_mvae_data(
         else:
             raise FileNotFoundError("Metadata table not found for MVAE training.")
 
-    common_cells = df_rna.index.intersection(meta_df.index)
+    common_cells = df_raw.index.intersection(meta_df.index)
     if len(common_cells) == 0:
-        min_len = min(len(df_rna), len(meta_df))
-        df_rna = df_rna.iloc[:min_len]
+        min_len = min(len(df_raw), len(meta_df))
+        df_raw = df_raw.iloc[:min_len]
         meta_df = meta_df.iloc[:min_len]
-        common_cells = df_rna.index
+        common_cells = df_raw.index
 
-    df_rna = df_rna.loc[common_cells]
+    df_raw = df_raw.loc[common_cells]
     meta_df = meta_df.loc[common_cells]
+
+    # HVG selection (default: raw_var) with optional min_cells_per_gene filter
+    method = resolve_hvg_method(hvg_method, default_method="raw_var")
+    top_genes = select_hvgs(
+        df_raw,
+        n_hvg=n_hvg,
+        hvg_method=method,
+        min_cells_per_gene=min_cells_per_gene,
+    )
+    df_rna = df_raw[top_genes]
 
     img_df = extract_morphology_features(meta_df)
 
@@ -380,6 +388,25 @@ def main():
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--latent_dim", type=int, default=10, help="Dimension of latent space z")
     parser.add_argument(
+        "--n_hvg",
+        type=int,
+        default=2000,
+        help="Number of highly variable genes to select for the RNA view (default: 2000)"
+    )
+    parser.add_argument(
+        "--hvg_method",
+        type=str,
+        default="default",
+        choices=["default", "raw_var", "log1p_var", "seurat", "seurat_v3"],
+        help="HVG selection method ('default' uses raw_var for Step 04b)"
+    )
+    parser.add_argument(
+        "--min_cells_per_gene",
+        type=int,
+        default=0,
+        help="Minimum number of cells expressing a gene (> 0 counts) required before HVG selection (default: 0, disabled)"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before MVAE HVG selection"
@@ -405,7 +432,9 @@ def main():
     scaled_rna, scaled_img, ploidy_series, rna_cols, img_cols, cell_ids = load_mvae_data(
         args.exp_dir,
         qc_meta_path,
-        n_hvg=2000,
+        n_hvg=args.n_hvg,
+        hvg_method=args.hvg_method,
+        min_cells_per_gene=args.min_cells_per_gene,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,
         exclude_genes=args.exclude_genes,

@@ -239,15 +239,15 @@ def load_metadata_sources(
     return combined_meta
 
 
-def apply_qc_filters(df):
+def apply_qc_filters(df, min_mapped_reads=20000, min_map_pc=50.0):
     """
     Applies strict morphotrans2 QC filtering pipeline:
     - Not contaminated (Contaminated == False)
     - Supervised ploidy in ['2n', '4n', '8n', '16n', '32n'] (excludes '64n' and NA)
     - control == False / 0
     - number_of_cell == 1
-    - kallisto.pc_map > 50.0
-    - kallisto.nb_mapped > 20000
+    - kallisto.pc_map > min_map_pc (default: 50.0)
+    - kallisto.nb_mapped > min_mapped_reads (default: 20000)
     """
     valid_ploidies = ["2n", "4n", "8n", "16n", "32n"]
 
@@ -257,8 +257,8 @@ def apply_qc_filters(df):
     cond_single_cell = df["single_cell"]
 
     # Kallisto mapping metrics rule matching morphotrans2 cell 14
-    cond_map_pc = df["kallisto.pc_map"].isna() | (df["kallisto.pc_map"] > 50.0)
-    cond_nb_mapped = df["kallisto.nb_mapped"].isna() | (df["kallisto.nb_mapped"] > 20000)
+    cond_map_pc = df["kallisto.pc_map"].isna() | (df["kallisto.pc_map"] > min_map_pc)
+    cond_nb_mapped = df["kallisto.nb_mapped"].isna() | (df["kallisto.nb_mapped"] > min_mapped_reads)
 
     full_qc_mask = (
         cond_not_contam &
@@ -344,14 +344,18 @@ def main():
     parser.add_argument("--test_dir", type=str, default="exp", help="Path to local Test/Pilot expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output CSVs and plots")
     parser.add_argument("--legacy_split", action="store_true", help="Force legacy Train/Pilot 2-dataset split ingestion for backwards compatibility")
+    parser.add_argument("--min_mapped_reads", type=int, default=20000, help="Minimum kallisto.nb_mapped reads per cell (default: 20000)")
+    parser.add_argument("--min_map_pc", type=float, default=50.0, help="Minimum kallisto.pc_map mapping percentage per cell (default: 50.0)")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"=== STEP 01: QUALITY CONTROL & METADATA FILTERING ===")
-    print(f"Metadata file  : {args.metadata_file}")
-    print(f"Train directory: {args.train_dir}")
-    print(f"Test directory : {args.test_dir}")
-    print(f"Legacy split   : {args.legacy_split}")
+    print(f"Metadata file    : {args.metadata_file}")
+    print(f"Train directory  : {args.train_dir}")
+    print(f"Test directory   : {args.test_dir}")
+    print(f"Legacy split     : {args.legacy_split}")
+    print(f"Min mapped reads : > {args.min_mapped_reads}")
+    print(f"Min map %        : > {args.min_map_pc}")
 
     # Load and harmonize metadata
     meta_df = load_metadata_sources(
@@ -363,8 +367,12 @@ def main():
     print(f"Total raw metadata records loaded: {len(meta_df)}")
 
     # Apply QC filters
-    full_df, qc_df = apply_qc_filters(meta_df)
-    print(f"Total cells passing ALL QC FILTERS: {len(qc_df)} (Combined M1-M7 cohort: 393 cells; Benchmark M1-M5: 291 cells)")
+    full_df, qc_df = apply_qc_filters(
+        meta_df,
+        min_mapped_reads=args.min_mapped_reads,
+        min_map_pc=args.min_map_pc,
+    )
+    print(f"Total cells passing ALL QC FILTERS: {len(qc_df)} (Default thresholds benchmark -> M1-M7: 393 cells; M1-M5: 291 cells)")
 
     if "mouse" in qc_df.columns:
         print("\nQC-passed cells per animal (Leave-One-Animal-Out folds):")
@@ -385,6 +393,8 @@ def main():
         "Contaminated_Cells": int(full_df["Contaminated_bool"].sum()),
         "Valid_Ploidy_Cells": int(full_df["Supervised_ploidy"].isin(["2n", "4n", "8n", "16n", "32n"]).sum()),
         "Single_Cells": int(full_df["single_cell"].sum()),
+        "Min_Mapped_Reads": args.min_mapped_reads,
+        "Min_Map_PC": args.min_map_pc,
         "QC_Passed_Cells": len(qc_df),
         "Total_Animals": int(qc_df["mouse"].nunique()) if "mouse" in qc_df.columns else 0
     }

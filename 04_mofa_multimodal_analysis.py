@@ -162,6 +162,8 @@ def prepare_mofa_input_matrices(
     exp_dir,
     qc_meta_path,
     n_hvg=2000,
+    hvg_method="default",
+    min_cells_per_gene=0,
     rna_likelihood="poisson",
     morph_likelihood="gaussian",
     rna_norm="raw_counts",
@@ -228,14 +230,17 @@ def prepare_mofa_input_matrices(
     df_raw = df_raw.loc[common_cells]
     meta_df = meta_df.loc[common_cells]
 
-    # Select HVGs on log1p library-normalized expression to avoid raw-count mean-variance bias,
+    # Select HVGs (default: variance on CP10K + log1p normalized expression) after optional min_cells_per_gene filter,
     # then extract the corresponding genes from the raw count matrix
-    lib_sizes = df_raw.clip(lower=0).sum(axis=1).replace(0, 1.0)
-    df_log_norm = np.log1p(df_raw.clip(lower=0).div(lib_sizes, axis=0) * 1e4)
-    gene_vars = df_log_norm.var(axis=0)
-    # Only keep genes expressed in at least 1 cell with non-zero variance
-    active_genes = gene_vars[gene_vars > 0]
-    top_genes = active_genes.nlargest(min(n_hvg, len(active_genes))).index
+    from hvg_utils import resolve_hvg_method, select_hvgs
+
+    method = resolve_hvg_method(hvg_method, default_method="log1p_var")
+    top_genes = select_hvgs(
+        df_raw,
+        n_hvg=n_hvg,
+        hvg_method=method,
+        min_cells_per_gene=min_cells_per_gene,
+    )
     df_rna_hvg = df_raw[top_genes]
 
     img_df = extract_morphology_features(meta_df)
@@ -374,6 +379,25 @@ def main():
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument("--factors", type=int, default=10, help="Number of latent factors")
     parser.add_argument(
+        "--n_hvg",
+        type=int,
+        default=2000,
+        help="Number of highly variable genes to select for the RNA view (default: 2000)"
+    )
+    parser.add_argument(
+        "--hvg_method",
+        type=str,
+        default="default",
+        choices=["default", "raw_var", "log1p_var", "seurat", "seurat_v3"],
+        help="HVG selection method ('default' uses log1p_var for Step 04)"
+    )
+    parser.add_argument(
+        "--min_cells_per_gene",
+        type=int,
+        default=0,
+        help="Minimum number of cells expressing a gene (> 0 counts) required before HVG selection (default: 0, disabled)"
+    )
+    parser.add_argument(
         "--rna_likelihood",
         type=str,
         default="poisson",
@@ -430,7 +454,9 @@ def main():
     proc_rna, proc_img, ploidy_series = prepare_mofa_input_matrices(
         args.exp_dir,
         qc_meta_path,
-        n_hvg=2000,
+        n_hvg=args.n_hvg,
+        hvg_method=args.hvg_method,
+        min_cells_per_gene=args.min_cells_per_gene,
         rna_likelihood=args.rna_likelihood,
         morph_likelihood=args.morph_likelihood,
         rna_norm=args.rna_norm,

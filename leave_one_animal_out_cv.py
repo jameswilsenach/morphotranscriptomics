@@ -422,6 +422,8 @@ def main():
     parser.add_argument("--metadata_file", type=str, default=r"C:\Users\vilsn\Dropbox\Work\Turing\Exploration_Data\Metadata_merged_YL_SF_20.10.26_v2.csv", help="Path to unified multi-animal metadata CSV")
     parser.add_argument("--qc_meta", type=str, default="output/qc_filtered_metadata.csv", help="Path to pre-filtered QC metadata CSV (optional)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save LOAOCV results and plots")
+    parser.add_argument("--min_mapped_reads", type=int, default=20000, help="Minimum kallisto.nb_mapped reads per cell if fallback QC is run (default: 20000)")
+    parser.add_argument("--min_map_pc", type=float, default=50.0, help="Minimum kallisto.pc_map mapping percentage per cell if fallback QC is run (default: 50.0)")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -435,7 +437,11 @@ def main():
         from importlib import import_module
         qc_mod = import_module("01_qc_and_metadata_filtering")
         raw_df = qc_mod.load_metadata_sources(metadata_file=args.metadata_file)
-        _, qc_df = qc_mod.apply_qc_filters(raw_df)
+        _, qc_df = qc_mod.apply_qc_filters(
+            raw_df,
+            min_mapped_reads=args.min_mapped_reads,
+            min_map_pc=args.min_map_pc,
+        )
         qc_df.to_csv(os.path.join(args.out_dir, "qc_filtered_metadata.csv"))
 
     run_leave_one_animal_out_cv(qc_df, out_dir=args.out_dir)

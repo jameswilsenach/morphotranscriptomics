@@ -184,7 +184,9 @@ def load_qc_metadata_backwards_compatible(
     qc_meta_path="output/qc_filtered_metadata.csv",
     train_dir=DEFAULT_TRAIN_DIR,
     test_dir="exp",
-    cohort_filter="all"
+    cohort_filter="all",
+    min_mapped_reads=20000,
+    min_map_pc=50.0,
 ):
     """
     Loads QC-filtered metadata supporting both the unified multi-animal metadata file
@@ -205,7 +207,11 @@ def load_qc_metadata_backwards_compatible(
             train_dir=train_dir,
             test_dir=test_dir
         )
-        full_df, qc_df = qc_mod.apply_qc_filters(meta_df)
+        full_df, qc_df = qc_mod.apply_qc_filters(
+            meta_df,
+            min_mapped_reads=min_mapped_reads,
+            min_map_pc=min_map_pc,
+        )
         if len(qc_df) == 0:
             print("[Metadata] Warning: No cells matched full strict QC in legacy file; falling back to all non-control cells.")
             qc_df = full_df[~full_df.get("is_control", pd.Series(False, index=full_df.index))].copy()
@@ -320,7 +326,9 @@ def load_expression_backwards_compatible(
     exp_dir=None,
     pilot_exp_dir=None,
     mofa_hdf5_path=None,
-    n_hvg=2000
+    n_hvg=2000,
+    hvg_method="default",
+    min_cells_per_gene=0,
 ):
     """
     Loads single-cell gene expression aligned to qc_df across all available cohorts.
@@ -409,17 +417,22 @@ def load_expression_backwards_compatible(
             "Could not match any cell barcodes between metadata and available expression sources."
         )
 
+    from hvg_utils import resolve_hvg_method, select_hvgs
+
+    resolved_method = resolve_hvg_method(hvg_method, default_method="raw_var")
+
     # Harmonize across expression cohorts
     if len(cohort_frames) == 1:
         kind, src_path, df_only = cohort_frames[0]
         if kind == "10x_mtx":
-            # Select top n_hvg variable genes and StandardScaler transform (matching morphotrans2)
-            gene_vars = df_only.var(axis=0)
-            active_genes = gene_vars[gene_vars > 0]
-            top_genes = active_genes.nlargest(min(n_hvg, len(active_genes))).index
-            # Ensure key MK markers are retained if present
-            marker_hits = [g for g in df_only.columns if g.lower() in {m.lower() for m in KEY_MK_MARKERS}]
-            final_genes = list(dict.fromkeys(list(top_genes) + marker_hits))
+            # Select top n_hvg variable genes (with optional min_cells_per_gene) and StandardScaler transform
+            final_genes = select_hvgs(
+                df_only,
+                n_hvg=n_hvg,
+                hvg_method=resolved_method,
+                min_cells_per_gene=min_cells_per_gene,
+                extra_keep_genes=KEY_MK_MARKERS,
+            )
             df_hvg = df_only[final_genes]
             df_scaled = pd.DataFrame(
                 StandardScaler().fit_transform(df_hvg),
@@ -428,6 +441,11 @@ def load_expression_backwards_compatible(
             )
             return df_scaled, pd.Series(cohort_sources)
         else:
+            if n_hvg != 2000 or min_cells_per_gene > 0 or hvg_method != "default":
+                print(
+                    f"[Expression] Note: Pre-saved MOFA HDF5 contains {df_only.shape[1]} pre-selected HVGs; "
+                    f"--n_hvg/--hvg_method/--min_cells_per_gene apply only to raw 10x matrix sources."
+                )
             return df_only, pd.Series(cohort_sources)
 
     # Multiple cohorts (e.g. 291 10plate cells + 102 4plate cells = 393 cells across M1-M7):
@@ -438,12 +456,20 @@ def load_expression_backwards_compatible(
         shared_genes = cols if shared_genes is None else shared_genes.intersection(cols)
 
     # If all sources are raw 10x matrices, select top n_hvg HVGs across shared genes
-    if all(kind == "10x_mtx" for kind, _, _ in cohort_frames) and len(shared_genes) > n_hvg:
+    if all(kind == "10x_mtx" for kind, _, _ in cohort_frames):
         pooled_raw = pd.concat([df_p[shared_genes] for _, _, df_p in cohort_frames], axis=0)
-        gene_vars = pooled_raw.var(axis=0)
-        top_genes = gene_vars[gene_vars > 0].nlargest(n_hvg).index
-        marker_hits = [g for g in shared_genes if g.lower() in {m.lower() for m in KEY_MK_MARKERS}]
-        shared_genes = pd.Index(list(dict.fromkeys(list(top_genes) + marker_hits)))
+        shared_genes = select_hvgs(
+            pooled_raw,
+            n_hvg=n_hvg,
+            hvg_method=resolved_method,
+            min_cells_per_gene=min_cells_per_gene,
+            extra_keep_genes=KEY_MK_MARKERS,
+        )
+    elif n_hvg != 2000 or min_cells_per_gene > 0 or hvg_method != "default":
+        print(
+            f"[Expression] Note: Combined sources include a pre-saved MOFA HDF5 ({len(shared_genes)} shared genes); "
+            f"--n_hvg/--hvg_method/--min_cells_per_gene require raw 10x matrices for all cohorts."
+        )
 
     scaled_parts = []
     for kind, src_path, df_part in cohort_frames:
@@ -1153,6 +1179,37 @@ def main():
         help="Output directory for CSV tables and figures"
     )
     parser.add_argument(
+        "--min_mapped_reads",
+        type=int,
+        default=20000,
+        help="Minimum kallisto.nb_mapped reads per cell if fallback QC is run (default: 20000)"
+    )
+    parser.add_argument(
+        "--min_map_pc",
+        type=float,
+        default=50.0,
+        help="Minimum kallisto.pc_map mapping percentage per cell if fallback QC is run (default: 50.0)"
+    )
+    parser.add_argument(
+        "--min_cells_per_gene",
+        type=int,
+        default=0,
+        help="Minimum number of cells expressing a gene (> 0 counts) before HVG selection (default: 0, disabled)"
+    )
+    parser.add_argument(
+        "--n_hvg",
+        type=int,
+        default=2000,
+        help="Number of highly variable genes to select from 10x matrices (default: 2000)"
+    )
+    parser.add_argument(
+        "--hvg_method",
+        type=str,
+        default="default",
+        choices=["default", "raw_var", "log1p_var", "seurat", "seurat_v3"],
+        help="HVG selection method ('default' uses raw_var for Step 06)"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before correlation analysis"
@@ -1182,14 +1239,19 @@ def main():
         qc_meta_path=args.qc_meta,
         train_dir=args.train_dir,
         test_dir=args.test_dir,
-        cohort_filter=args.cohort
+        cohort_filter=args.cohort,
+        min_mapped_reads=args.min_mapped_reads,
+        min_map_pc=args.min_map_pc,
     )
 
     # 2. Load gene expression aligned to QC-passed cells across available sources
     df_rna_raw, cohort_sources = load_expression_backwards_compatible(
         qc_df=qc_df,
         exp_dir=args.exp_dir,
-        pilot_exp_dir=args.pilot_exp_dir
+        pilot_exp_dir=args.pilot_exp_dir,
+        n_hvg=args.n_hvg,
+        hvg_method=args.hvg_method,
+        min_cells_per_gene=args.min_cells_per_gene,
     )
 
     # Optional cited cell-cycle and/or custom gene exclusion (applied prior to depth adjustment & Spearman correlation)

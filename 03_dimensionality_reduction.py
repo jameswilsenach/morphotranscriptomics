@@ -98,15 +98,21 @@ def load_and_preprocess_anndata(
     return adata
 
 
-def compute_hvg_pca_umap(adata, n_top_genes=2000):
+def compute_hvg_pca_umap(adata, n_top_genes=2000, hvg_method="default", min_cells_per_gene=0):
     """
-    Selects top 2000 HVGs, scales data, calculates PCA and UMAP embeddings.
+    Filters genes by optional minimum cell prevalence, selects top HVGs, scales data,
+    and calculates PCA and UMAP embeddings.
     """
-    df_raw = adata.to_df()
+    from hvg_utils import resolve_hvg_method, select_hvgs
 
-    # Calculate gene variance to select top HVGs
-    gene_vars = df_raw.var(axis=0)
-    top_hvg = gene_vars.nlargest(n_top_genes).index
+    df_raw = adata.to_df()
+    method = resolve_hvg_method(hvg_method, default_method="raw_var")
+    top_hvg = select_hvgs(
+        df_raw,
+        n_hvg=n_top_genes,
+        hvg_method=method,
+        min_cells_per_gene=min_cells_per_gene,
+    )
     df_hvg = df_raw[top_hvg]
 
     # Standard scale
@@ -119,7 +125,7 @@ def compute_hvg_pca_umap(adata, n_top_genes=2000):
     cum_var = np.cumsum(pca.explained_variance_ratio_)
     idx_90 = np.searchsorted(cum_var, 0.90)
     n_pcs_90 = min(int(idx_90) + 1, len(cum_var))
-    print(f"Filtered data shape ({n_top_genes} most variable genes): {df_hvg.shape}")
+    print(f"Filtered data shape ({len(top_hvg)} HVGs, method='{method}'): {df_hvg.shape}")
     print(f"Number of PCs retaining 90%+ variance: {n_pcs_90}")
     print(f"Cumulative explained variance (first {n_pcs_90} PCs): {cum_var[n_pcs_90-1]:.4f}")
 
@@ -214,6 +220,25 @@ def main():
     parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument(
+        "--n_hvg",
+        type=int,
+        default=2000,
+        help="Number of highly variable genes to select (default: 2000)"
+    )
+    parser.add_argument(
+        "--hvg_method",
+        type=str,
+        default="default",
+        choices=["default", "raw_var", "log1p_var", "seurat", "seurat_v3"],
+        help="HVG selection method ('default' uses raw_var for Step 03)"
+    )
+    parser.add_argument(
+        "--min_cells_per_gene",
+        type=int,
+        default=0,
+        help="Minimum number of cells expressing a gene (> 0 counts) required before HVG selection (default: 0, disabled)"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before HVG selection"
@@ -245,7 +270,12 @@ def main():
         out_dir=args.out_dir,
     )
 
-    adata = compute_hvg_pca_umap(adata, n_top_genes=2000)
+    adata = compute_hvg_pca_umap(
+        adata,
+        n_top_genes=args.n_hvg,
+        hvg_method=args.hvg_method,
+        min_cells_per_gene=args.min_cells_per_gene,
+    )
 
     # Save UMAP coordinates CSV
     umap_df = adata.obs[["Supervised_ploidy", "UMAP1", "UMAP2"]].copy()
