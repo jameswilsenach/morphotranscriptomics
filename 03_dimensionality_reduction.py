@@ -37,10 +37,18 @@ def setup_plot_style():
     sns.set_theme(style="whitegrid")
 
 
-def load_and_preprocess_anndata(exp_dir, qc_meta_path=None, cell_cycle_mode="none"):
+def load_and_preprocess_anndata(
+    exp_dir,
+    qc_meta_path=None,
+    exclude_cell_cycle=False,
+    exclude_genes_file=None,
+    exclude_genes=None,
+    out_dir=None,
+):
     """
-    Loads 10x expression matrix into Scanpy AnnData, applies gene filters,
-    handles optional cell cycle regression or removal, and merges QC-passed metadata.
+    Loads 10x expression matrix into Scanpy AnnData, applies gene filters
+    (ribosomal/Unnamed plus optional cited cell-cycle or custom gene exclusion),
+    and merges QC-passed metadata.
     """
     if not os.path.exists(exp_dir) and os.path.exists("exp"):
         exp_dir = "exp"
@@ -57,19 +65,20 @@ def load_and_preprocess_anndata(exp_dir, qc_meta_path=None, cell_cycle_mode="non
     genes_to_keep = ~(is_ribo | is_unnamed)
     adata = adata[:, genes_to_keep].copy()
 
-    # Optional cell cycle handling
-    from cell_cycle import filter_cell_cycle_genes, regress_cell_cycle_adata, score_cell_cycle
-    if cell_cycle_mode == "filter":
-        print("[Cell Cycle] Mode 'filter': Excluded canonical cell cycle genes from feature space.")
-        cc_mask = filter_cell_cycle_genes(adata.var_names)
-        adata = adata[:, cc_mask].copy()
-    elif cell_cycle_mode == "regress":
-        print("[Cell Cycle] Mode 'regress': Scoring phases and regressing out cell cycle scores.")
-        adata = regress_cell_cycle_adata(adata)
-    elif cell_cycle_mode == "none":
-        print("[Cell Cycle] Mode 'none': Retained all cell cycle genes (original notebook baseline).")
+    # Optional cited cell-cycle and/or custom gene exclusion
+    if exclude_cell_cycle or exclude_genes_file or exclude_genes:
+        from cell_cycle import filter_excluded_genes
+        audit_path = os.path.join(out_dir, "03_excluded_genes_audit.csv") if out_dir else None
+        keep_mask, _ = filter_excluded_genes(
+            adata.var_names,
+            exclude_cell_cycle=exclude_cell_cycle,
+            exclude_genes_file=exclude_genes_file,
+            exclude_genes=exclude_genes,
+            audit_csv_path=audit_path,
+        )
+        adata = adata[:, keep_mask].copy()
     else:
-        raise ValueError(f"Invalid cell_cycle_mode: {cell_cycle_mode}. Choose from ['none', 'filter', 'regress'].")
+        print("[Gene Filter] No additional gene exclusions applied (original notebook baseline).")
 
     # Merge QC metadata if available
     if qc_meta_path and os.path.exists(qc_meta_path):
@@ -197,30 +206,6 @@ def plot_umap_projections(adata, out_dir, marker_genes=["kalrn", "pf4"]):
             plt.savefig(gene_png)
             plt.close()
 
-    # Plot 4: Cell Cycle Phase (if scored)
-    if "phase" in adata.obs.columns:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        phases = [p for p in ["G1", "S", "G2M"] if p in adata.obs["phase"].values]
-        palette = {"G1": "#4daf4a", "S": "#377eb8", "G2M": "#e41a1c"}
-        for phase in phases:
-            mask = adata.obs["phase"] == phase
-            ax.scatter(
-                adata.obs.loc[mask, "UMAP1"],
-                adata.obs.loc[mask, "UMAP2"],
-                label=f"Phase {phase} (n={mask.sum()})",
-                color=palette.get(phase, "#999999"),
-                s=60,
-                alpha=0.8
-            )
-        ax.set_title("UMAP Manifold Projection: Cell Cycle Phase", fontsize=13, fontweight="bold")
-        ax.set_xlabel("UMAP 1")
-        ax.set_ylabel("UMAP 2")
-        ax.legend(title="Assigned Phase")
-        plt.tight_layout()
-        cc_png = os.path.join(out_dir, "03_umap_cell_cycle_phase.png")
-        plt.savefig(cc_png)
-        plt.close()
-
     print(f"[Dimensionality Reduction] Saved UMAP figures to: {os.path.abspath(out_dir)}")
 
 
@@ -229,19 +214,36 @@ def main():
     parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument(
-        "--cell_cycle_mode",
+        "--exclude_cell_cycle",
+        action="store_true",
+        help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before HVG selection"
+    )
+    parser.add_argument(
+        "--exclude_genes_file",
         type=str,
-        default="none",
-        choices=["none", "filter", "regress"],
-        help="Cell cycle handling strategy: 'none' (default, original notebook), 'filter' (drop CC genes), 'regress' (regress out S/G2M scores)"
+        default=None,
+        help="Path to a .txt/.csv/.tsv file of gene symbols to exclude (e.g., GO:0007049 or custom list)"
+    )
+    parser.add_argument(
+        "--exclude_genes",
+        type=str,
+        default=None,
+        help="Comma-separated inline list of gene symbols to exclude (e.g. 'Mki67,Top2a,Cdk1')"
     )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 03: DIMENSIONALITY REDUCTION (PCA & UMAP) [Cell Cycle: {args.cell_cycle_mode}] ===")
+    print(f"=== STEP 03: DIMENSIONALITY REDUCTION (PCA & UMAP) ===")
 
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
-    adata = load_and_preprocess_anndata(args.exp_dir, qc_meta_path, cell_cycle_mode=args.cell_cycle_mode)
+    adata = load_and_preprocess_anndata(
+        args.exp_dir,
+        qc_meta_path,
+        exclude_cell_cycle=args.exclude_cell_cycle,
+        exclude_genes_file=args.exclude_genes_file,
+        exclude_genes=args.exclude_genes,
+        out_dir=args.out_dir,
+    )
 
     adata = compute_hvg_pca_umap(adata, n_top_genes=2000)
 

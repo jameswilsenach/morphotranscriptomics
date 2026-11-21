@@ -166,7 +166,10 @@ def prepare_mofa_input_matrices(
     morph_likelihood="gaussian",
     rna_norm="raw_counts",
     log_morph=False,
-    cell_cycle_mode="none"
+    exclude_cell_cycle=False,
+    exclude_genes_file=None,
+    exclude_genes=None,
+    out_dir=None,
 ):
     """
     Ingests and normalizes RNA expression and Morphology data for common QC-passed cells
@@ -187,18 +190,20 @@ def prepare_mofa_input_matrices(
     is_unnamed = adata.var_names.str.startswith('Unnamed')
     adata = adata[:, ~(is_ribo | is_unnamed)].copy()
 
-    # Optional cell cycle handling
-    from cell_cycle import filter_cell_cycle_genes, regress_cell_cycle_df
-    if cell_cycle_mode == "filter":
-        print("[Cell Cycle] MOFA2 RNA View: Filtering out canonical cell cycle genes.")
-        cc_mask = filter_cell_cycle_genes(adata.var_names)
-        adata = adata[:, cc_mask].copy()
-    elif cell_cycle_mode == "regress":
-        print("[Cell Cycle] MOFA2 RNA View: Regressing out cell cycle scores.")
-    elif cell_cycle_mode == "none":
-        print("[Cell Cycle] MOFA2 RNA View: Retained all cell cycle genes (baseline).")
+    # Optional cited cell-cycle and/or custom gene exclusion
+    if exclude_cell_cycle or exclude_genes_file or exclude_genes:
+        from cell_cycle import filter_excluded_genes
+        audit_path = os.path.join(out_dir, "04_mofa_excluded_genes_audit.csv") if out_dir else None
+        keep_mask, _ = filter_excluded_genes(
+            adata.var_names,
+            exclude_cell_cycle=exclude_cell_cycle,
+            exclude_genes_file=exclude_genes_file,
+            exclude_genes=exclude_genes,
+            audit_csv_path=audit_path,
+        )
+        adata = adata[:, keep_mask].copy()
     else:
-        raise ValueError(f"Invalid cell_cycle_mode: {cell_cycle_mode}")
+        print("[Gene Filter] MOFA2 RNA View: No additional gene exclusions applied (baseline).")
 
     df_raw = adata.to_df()
 
@@ -227,16 +232,11 @@ def prepare_mofa_input_matrices(
     # then extract the corresponding genes from the raw count matrix
     lib_sizes = df_raw.clip(lower=0).sum(axis=1).replace(0, 1.0)
     df_log_norm = np.log1p(df_raw.clip(lower=0).div(lib_sizes, axis=0) * 1e4)
-    if cell_cycle_mode == "regress":
-        df_log_norm = regress_cell_cycle_df(df_log_norm)
     gene_vars = df_log_norm.var(axis=0)
     # Only keep genes expressed in at least 1 cell with non-zero variance
     active_genes = gene_vars[gene_vars > 0]
     top_genes = active_genes.nlargest(min(n_hvg, len(active_genes))).index
-    if cell_cycle_mode == "regress" and rna_likelihood == "gaussian":
-        df_rna_hvg = df_log_norm[top_genes]
-    else:
-        df_rna_hvg = df_raw[top_genes]
+    df_rna_hvg = df_raw[top_genes]
 
     img_df = extract_morphology_features(meta_df)
 
@@ -405,16 +405,26 @@ def main():
         help="Reuse existing HDF5 model file if present instead of retraining"
     )
     parser.add_argument(
-        "--cell_cycle_mode",
+        "--exclude_cell_cycle",
+        action="store_true",
+        help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before MOFA2 HVG selection"
+    )
+    parser.add_argument(
+        "--exclude_genes_file",
         type=str,
-        default="none",
-        choices=["none", "filter", "regress"],
-        help="Cell cycle handling strategy: 'none' (default, original notebook baseline), 'filter' (drop CC genes), 'regress' (regress out CC scores)"
+        default=None,
+        help="Path to a .txt/.csv/.tsv file of gene symbols to exclude (e.g., GO:0007049 or custom list)"
+    )
+    parser.add_argument(
+        "--exclude_genes",
+        type=str,
+        default=None,
+        help="Comma-separated inline list of gene symbols to exclude (e.g. 'Mki67,Top2a,Cdk1')"
     )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 04: MULTI-OMICS FACTOR ANALYSIS (MOFA2) [Cell Cycle: {args.cell_cycle_mode}] ===")
+    print(f"=== STEP 04: MULTI-OMICS FACTOR ANALYSIS (MOFA2) ===")
 
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
     proc_rna, proc_img, ploidy_series = prepare_mofa_input_matrices(
@@ -425,7 +435,10 @@ def main():
         morph_likelihood=args.morph_likelihood,
         rna_norm=args.rna_norm,
         log_morph=args.log_morph,
-        cell_cycle_mode=args.cell_cycle_mode
+        exclude_cell_cycle=args.exclude_cell_cycle,
+        exclude_genes_file=args.exclude_genes_file,
+        exclude_genes=args.exclude_genes,
+        out_dir=args.out_dir,
     )
 
     model_hdf5 = "mofa_model_rna_morphology.hdf5"

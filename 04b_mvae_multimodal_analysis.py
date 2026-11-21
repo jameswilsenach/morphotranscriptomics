@@ -153,7 +153,15 @@ def extract_morphology_features(meta_df):
     return img_df
 
 
-def load_mvae_data(exp_dir, qc_meta_path, n_hvg=2000, cell_cycle_mode="none"):
+def load_mvae_data(
+    exp_dir,
+    qc_meta_path,
+    n_hvg=2000,
+    exclude_cell_cycle=False,
+    exclude_genes_file=None,
+    exclude_genes=None,
+    out_dir=None,
+):
     """Ingests and standardizes RNA and Morphology matrices for MVAE training."""
     import scanpy as sc
 
@@ -170,33 +178,27 @@ def load_mvae_data(exp_dir, qc_meta_path, n_hvg=2000, cell_cycle_mode="none"):
     is_unnamed = adata.var_names.str.startswith('Unnamed')
     adata = adata[:, ~(is_ribo | is_unnamed)].copy()
 
-    # Optional cell cycle handling
-    from cell_cycle import filter_cell_cycle_genes, regress_cell_cycle_df
-    if cell_cycle_mode == "filter":
-        print("[Cell Cycle] MVAE RNA View: Filtering out canonical cell cycle genes.")
-        cc_mask = filter_cell_cycle_genes(adata.var_names)
-        adata = adata[:, cc_mask].copy()
-    elif cell_cycle_mode == "regress":
-        print("[Cell Cycle] MVAE RNA View: Regressing out cell cycle scores.")
-    elif cell_cycle_mode == "none":
-        print("[Cell Cycle] MVAE RNA View: Retained all cell cycle genes (baseline).")
+    # Optional cited cell-cycle and/or custom gene exclusion
+    if exclude_cell_cycle or exclude_genes_file or exclude_genes:
+        from cell_cycle import filter_excluded_genes
+        audit_path = os.path.join(out_dir, "04b_mvae_excluded_genes_audit.csv") if out_dir else None
+        keep_mask, _ = filter_excluded_genes(
+            adata.var_names,
+            exclude_cell_cycle=exclude_cell_cycle,
+            exclude_genes_file=exclude_genes_file,
+            exclude_genes=exclude_genes,
+            audit_csv_path=audit_path,
+        )
+        adata = adata[:, keep_mask].copy()
     else:
-        raise ValueError(f"Invalid cell_cycle_mode: {cell_cycle_mode}")
+        print("[Gene Filter] MVAE RNA View: No additional gene exclusions applied (baseline).")
 
     df_raw = adata.to_df()
 
-    # HVG selection (with regression if enabled)
-    if cell_cycle_mode == "regress":
-        lib_sizes = df_raw.clip(lower=0).sum(axis=1).replace(0, 1.0)
-        df_log_norm = np.log1p(df_raw.clip(lower=0).div(lib_sizes, axis=0) * 1e4)
-        df_log_norm = regress_cell_cycle_df(df_log_norm)
-        gene_vars = df_log_norm.var(axis=0)
-        top_genes = gene_vars.nlargest(n_hvg).index
-        df_rna = df_log_norm[top_genes]
-    else:
-        gene_vars = df_raw.var(axis=0)
-        top_genes = gene_vars.nlargest(n_hvg).index
-        df_rna = df_raw[top_genes]
+    # HVG selection
+    gene_vars = df_raw.var(axis=0)
+    top_genes = gene_vars.nlargest(n_hvg).index
+    df_rna = df_raw[top_genes]
 
     # QC Metadata
     if qc_meta_path and os.path.exists(qc_meta_path):
@@ -378,20 +380,36 @@ def main():
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--latent_dim", type=int, default=10, help="Dimension of latent space z")
     parser.add_argument(
-        "--cell_cycle_mode",
+        "--exclude_cell_cycle",
+        action="store_true",
+        help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before MVAE HVG selection"
+    )
+    parser.add_argument(
+        "--exclude_genes_file",
         type=str,
-        default="none",
-        choices=["none", "filter", "regress"],
-        help="Cell cycle handling strategy: 'none' (default, original notebook baseline), 'filter' (drop CC genes), 'regress' (regress out CC scores)"
+        default=None,
+        help="Path to a .txt/.csv/.tsv file of gene symbols to exclude (e.g., GO:0007049 or custom list)"
+    )
+    parser.add_argument(
+        "--exclude_genes",
+        type=str,
+        default=None,
+        help="Comma-separated inline list of gene symbols to exclude (e.g. 'Mki67,Top2a,Cdk1')"
     )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 04b: PYTORCH MULTIMODAL VAE (MVAE) TRAINING & RECONSTRUCTION [Cell Cycle: {args.cell_cycle_mode}] ===")
+    print(f"=== STEP 04b: PYTORCH MULTIMODAL VAE (MVAE) TRAINING & RECONSTRUCTION ===")
 
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
     scaled_rna, scaled_img, ploidy_series, rna_cols, img_cols, cell_ids = load_mvae_data(
-        args.exp_dir, qc_meta_path, n_hvg=2000, cell_cycle_mode=args.cell_cycle_mode
+        args.exp_dir,
+        qc_meta_path,
+        n_hvg=2000,
+        exclude_cell_cycle=args.exclude_cell_cycle,
+        exclude_genes_file=args.exclude_genes_file,
+        exclude_genes=args.exclude_genes,
+        out_dir=args.out_dir,
     )
 
     x_rna_tensor = torch.tensor(scaled_rna, dtype=torch.float32)

@@ -75,13 +75,19 @@ def load_10x_expression_data(exp_dir):
     return matrix, features_df, barcodes
 
 
-def filter_genes(features_df, matrix, cell_cycle_mode="none"):
+def filter_genes(
+    features_df,
+    matrix,
+    exclude_cell_cycle=False,
+    exclude_genes_file=None,
+    exclude_genes=None,
+    out_dir=None,
+):
     """
     Applies morphotrans2 gene filtering logic:
-    - Excludes mitochondrial genes starting with 'mt-'
     - Excludes ribosomal genes starting with ('Rps', 'Rpl')
     - Excludes genes starting with 'Unnamed'
-    - Optionally excludes canonical cell cycle genes if cell_cycle_mode == 'filter'
+    - Optionally excludes cited cell-cycle genes and/or user-supplied genes
     """
     symbols = features_df["gene_symbol"].astype(str)
     
@@ -92,13 +98,19 @@ def filter_genes(features_df, matrix, cell_cycle_mode="none"):
     # morphotrans2 notebook rule: genes_to_keep = ~(is_ribo | is_unnamed)
     genes_to_keep = ~(is_ribo | is_unnamed)
 
-    if cell_cycle_mode == "filter":
-        from cell_cycle import filter_cell_cycle_genes
-        cc_mask = filter_cell_cycle_genes(symbols)
+    if exclude_cell_cycle or exclude_genes_file or exclude_genes:
+        from cell_cycle import filter_excluded_genes
+        audit_path = os.path.join(out_dir, "02_excluded_genes_audit.csv") if out_dir else None
+        cc_mask, _ = filter_excluded_genes(
+            symbols,
+            exclude_cell_cycle=exclude_cell_cycle,
+            exclude_genes_file=exclude_genes_file,
+            exclude_genes=exclude_genes,
+            audit_csv_path=audit_path,
+        )
         genes_to_keep = genes_to_keep & cc_mask
-        print(f"[Cell Cycle] Filtered out cell cycle genes from ranking pool.")
-    elif cell_cycle_mode == "none":
-        print("[Cell Cycle] Mode 'none': Retained all cell cycle genes (baseline).")
+    else:
+        print("[Gene Filter] No additional gene exclusions applied (baseline).")
 
     keep_indices = np.where(genes_to_keep)[0]
 
@@ -255,22 +267,39 @@ def main():
     parser.add_argument("--exp_dir", type=str, default=r"D:\Morphotranscriptomic_Data\expression", help="10x expression directory")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument(
-        "--cell_cycle_mode",
+        "--exclude_cell_cycle",
+        action="store_true",
+        help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes from ranking pool"
+    )
+    parser.add_argument(
+        "--exclude_genes_file",
         type=str,
-        default="none",
-        choices=["none", "filter"],
-        help="Cell cycle handling strategy: 'none' (default, original notebook baseline), 'filter' (exclude CC genes)"
+        default=None,
+        help="Path to a .txt/.csv/.tsv file of gene symbols to exclude (e.g., GO:0007049 or custom list)"
+    )
+    parser.add_argument(
+        "--exclude_genes",
+        type=str,
+        default=None,
+        help="Comma-separated inline list of gene symbols to exclude (e.g. 'Mki67,Top2a,Cdk1')"
     )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"=== STEP 02: GENE EXPRESSION RANKINGS & CELL MAPPING [Cell Cycle: {args.cell_cycle_mode}] ===")
+    print(f"=== STEP 02: GENE EXPRESSION RANKINGS & CELL MAPPING ===")
 
     # Load 10x matrix data
     matrix, features_df, barcodes = load_10x_expression_data(args.exp_dir)
 
-    # Filter genes matching morphotrans2 rules
-    matrix, features_df, _ = filter_genes(features_df, matrix, cell_cycle_mode=args.cell_cycle_mode)
+    # Filter genes matching morphotrans2 rules (+ optional exclusions)
+    matrix, features_df, _ = filter_genes(
+        features_df,
+        matrix,
+        exclude_cell_cycle=args.exclude_cell_cycle,
+        exclude_genes_file=args.exclude_genes_file,
+        exclude_genes=args.exclude_genes,
+        out_dir=args.out_dir,
+    )
 
     # Check for QC metadata from Step 01
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
