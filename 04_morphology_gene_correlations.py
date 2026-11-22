@@ -85,10 +85,18 @@ KEY_MK_MARKERS = [
 ]
 
 
-def harmonize_and_adjust_modalities(df_rna, df_morph, cohort_sources, adjust_library_depth=True):
+def harmonize_and_adjust_modalities(
+    df_rna,
+    df_morph,
+    cohort_sources,
+    adjust_library_depth=True,
+    regress_cell_cycle="none",
+):
     """
-    Harmonizes RNA expression and imaging morphology across cohorts (e.g. 10plate M1-M5 vs 4plate M6-M7)
-    and optionally residualizes out per-cell sequencing library depth / global detection bias.
+    Harmonizes RNA expression and imaging morphology across cohorts (e.g. 10plate M1-M5 vs 4plate M6-M7),
+    optionally residualizes out per-cell sequencing library depth / global detection bias (CDR),
+    and if `regress_cell_cycle != 'none'` re-orthogonalizes against precomputed cell-cycle scores
+    so that depth normalization strictly precedes cell-cycle regression.
 
     Why this is critical:
       In megakaryocyte sorting, larger polyploid cells (16n, 32n) exhibit lower total library counts
@@ -96,8 +104,11 @@ def harmonize_and_adjust_modalities(df_rna, df_morph, cohort_sources, adjust_lib
       correlated with cell size. Adjusting for per-cell library depth and cohort scale reveals the
       true gene-specific morphology correlations (e.g. Ppbp, Mylk, Pde3a, Kalrn, Rock1, Exoc6).
     """
+    from preprocessing import score_and_regress_cell_cycle
+
     df_morph_h = df_morph.copy().astype(np.float64)
     df_rna_h = df_rna.copy().astype(np.float64)
+    cc_scores_all = df_rna.attrs.get("cc_scores_df", None)
 
     for src in cohort_sources.unique():
         mask = (cohort_sources == src).values
@@ -121,6 +132,16 @@ def harmonize_and_adjust_modalities(df_rna, df_morph, cohort_sources, adjust_lib
                 r_std[r_std == 0] = 1.0
                 df_rna_h.iloc[mask] = (res - np.mean(res, axis=0, keepdims=True)) / r_std
 
+        # Ensure cell-cycle regression is applied AFTER depth / CDR adjustment
+        if regress_cell_cycle != "none" and adjust_library_depth:
+            sub_r_df = df_rna_h.iloc[mask]
+            sub_scores = cc_scores_all.reindex(sub_r_df.index) if cc_scores_all is not None else None
+            sub_reg, _ = score_and_regress_cell_cycle(sub_r_df, mode=regress_cell_cycle, scores_df=sub_scores)
+            r_std = sub_reg.std(axis=0).replace(0, 1.0)
+            df_rna_h.iloc[mask] = (sub_reg - sub_reg.mean(axis=0)) / r_std
+
+    if cc_scores_all is not None:
+        df_rna_h.attrs["cc_scores_df"] = cc_scores_all
     return df_rna_h, df_morph_h
 
 
@@ -337,6 +358,10 @@ def load_expression_backwards_compatible(
     n_hvg=2000,
     hvg_method="default",
     min_cells_per_gene=0,
+    depth_norm="cp10k_log1p",
+    regress_cell_cycle="none",
+    out_dir=None,
+    step_prefix="04",
 ):
     """
     Loads single-cell gene expression aligned to qc_df across all available cohorts.
@@ -426,20 +451,53 @@ def load_expression_backwards_compatible(
         )
 
     from hvg_utils import resolve_hvg_method, select_hvgs
+    from preprocessing import depth_normalize_expression, score_and_regress_cell_cycle
 
-    resolved_method = resolve_hvg_method(hvg_method, default_method="raw_var")
+    already_log = depth_norm == "cp10k_log1p"
+    resolved_method = resolve_hvg_method(hvg_method, default_method="log1p_var" if already_log else "raw_var")
+
+    # Apply canonical per-cohort preprocessing: Depth Normalization -> Cell-Cycle Regression
+    processed_frames = []
+    raw_frames_10x = []
+    cc_score_parts = []
+    for kind, src_path, df_part in cohort_frames:
+        if kind == "10x_mtx":
+            raw_frames_10x.append(df_part)
+            df_proc = depth_normalize_expression(df_part, method=depth_norm)
+        else:
+            if depth_norm != "none":
+                print("[Depth Norm] Notice: Pre-saved MOFA HDF5 is already z-scored; skipping CP10K + log1p for HDF5 cohort.")
+            df_proc = df_part.astype(np.float64).copy()
+
+        df_proc, cc_scores = score_and_regress_cell_cycle(df_proc, mode=regress_cell_cycle)
+        if cc_scores is not None:
+            cc_score_parts.append(cc_scores)
+        processed_frames.append((kind, src_path, df_proc, df_part if kind == "10x_mtx" else None))
+
+    cc_scores_all = pd.concat(cc_score_parts, axis=0) if cc_score_parts else None
+    if cc_scores_all is not None and out_dir and regress_cell_cycle != "none":
+        prefix = f"{step_prefix}_" if step_prefix else ""
+        cc_csv = os.path.join(out_dir, f"{prefix}cell_cycle_scores.csv")
+        cc_out = cc_scores_all.copy()
+        cc_out["regress_mode"] = regress_cell_cycle
+        cc_out.index.name = "SampleID"
+        os.makedirs(os.path.dirname(os.path.abspath(cc_csv)), exist_ok=True)
+        cc_out.to_csv(cc_csv)
+        print(f"[Cell Cycle Regression] Saved per-cell cell-cycle scores to: {os.path.abspath(cc_csv)}")
 
     # Harmonize across expression cohorts
-    if len(cohort_frames) == 1:
-        kind, src_path, df_only = cohort_frames[0]
+    if len(processed_frames) == 1:
+        kind, src_path, df_only, df_raw_only = processed_frames[0]
         if kind == "10x_mtx":
-            # Select top n_hvg variable genes (with optional min_cells_per_gene) and StandardScaler transform
+            # Select top n_hvg variable genes (with optional min_cells_per_gene on raw counts) and StandardScaler transform
             final_genes = select_hvgs(
                 df_only,
                 n_hvg=n_hvg,
                 hvg_method=resolved_method,
                 min_cells_per_gene=min_cells_per_gene,
                 extra_keep_genes=KEY_MK_MARKERS,
+                already_log_normalized=already_log,
+                raw_counts_for_filter=df_raw_only,
             )
             df_hvg = df_only[final_genes]
             df_scaled = pd.DataFrame(
@@ -447,6 +505,8 @@ def load_expression_backwards_compatible(
                 index=df_hvg.index,
                 columns=df_hvg.columns
             )
+            if cc_scores_all is not None:
+                df_scaled.attrs["cc_scores_df"] = cc_scores_all.reindex(df_scaled.index)
             return df_scaled, pd.Series(cohort_sources)
         else:
             if n_hvg != 2000 or min_cells_per_gene > 0 or hvg_method != "default":
@@ -454,24 +514,29 @@ def load_expression_backwards_compatible(
                     f"[Expression] Note: Pre-saved MOFA HDF5 contains {df_only.shape[1]} pre-selected HVGs; "
                     f"--n_hvg/--hvg_method/--min_cells_per_gene apply only to raw 10x matrix sources."
                 )
+            if cc_scores_all is not None:
+                df_only.attrs["cc_scores_df"] = cc_scores_all.reindex(df_only.index)
             return df_only, pd.Series(cohort_sources)
 
     # Multiple cohorts (e.g. 291 10plate cells + 102 4plate cells = 393 cells across M1-M7):
     # Find shared genes and standardize within each cohort so z-scores are directly comparable
     shared_genes = None
-    for _, _, df_part in cohort_frames:
+    for _, _, df_part, _ in processed_frames:
         cols = pd.Index(df_part.columns)
         shared_genes = cols if shared_genes is None else shared_genes.intersection(cols)
 
     # If all sources are raw 10x matrices, select top n_hvg HVGs across shared genes
-    if all(kind == "10x_mtx" for kind, _, _ in cohort_frames):
-        pooled_raw = pd.concat([df_p[shared_genes] for _, _, df_p in cohort_frames], axis=0)
+    if all(kind == "10x_mtx" for kind, _, _, _ in processed_frames):
+        pooled_proc = pd.concat([df_p[shared_genes] for _, _, df_p, _ in processed_frames], axis=0)
+        pooled_raw = pd.concat([df_r[shared_genes] for _, _, _, df_r in processed_frames], axis=0)
         shared_genes = select_hvgs(
-            pooled_raw,
+            pooled_proc,
             n_hvg=n_hvg,
             hvg_method=resolved_method,
             min_cells_per_gene=min_cells_per_gene,
             extra_keep_genes=KEY_MK_MARKERS,
+            already_log_normalized=already_log,
+            raw_counts_for_filter=pooled_raw,
         )
     elif n_hvg != 2000 or min_cells_per_gene > 0 or hvg_method != "default":
         print(
@@ -480,7 +545,7 @@ def load_expression_backwards_compatible(
         )
 
     scaled_parts = []
-    for kind, src_path, df_part in cohort_frames:
+    for kind, src_path, df_part, _ in processed_frames:
         sub = df_part[shared_genes].copy()
         # Standardize each cohort to zero mean and unit variance per gene
         scaled_arr = StandardScaler().fit_transform(sub.values)
@@ -489,9 +554,11 @@ def load_expression_backwards_compatible(
     df_combined = pd.concat(scaled_parts, axis=0)
     ordered_ids = [c for c in qc_df.index.astype(str) if c in df_combined.index]
     df_combined = df_combined.loc[ordered_ids]
+    if cc_scores_all is not None:
+        df_combined.attrs["cc_scores_df"] = cc_scores_all.reindex(ordered_ids)
     print(
         f"[Expression] Combined multi-cohort expression matrix: {df_combined.shape[0]} cells x "
-        f"{df_combined.shape[1]} genes across {len(cohort_frames)} sources."
+        f"{df_combined.shape[1]} genes across {len(processed_frames)} sources."
     )
     return df_combined, pd.Series(cohort_sources).reindex(ordered_ids)
 
@@ -1218,6 +1285,20 @@ def main():
         help="HVG selection method ('default' uses raw_var for Step 04)"
     )
     parser.add_argument(
+        "--depth_norm",
+        type=str,
+        default="cp10k_log1p",
+        choices=["cp10k_log1p", "none"],
+        help="Library-size depth normalization before cell-cycle regression & HVG selection (default: cp10k_log1p)"
+    )
+    parser.add_argument(
+        "--regress_cell_cycle",
+        type=str,
+        default="none",
+        choices=["none", "full", "difference"],
+        help="Cell-cycle regression after depth normalization: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M)"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before correlation analysis"
@@ -1253,6 +1334,7 @@ def main():
     )
 
     # 2. Load gene expression aligned to QC-passed cells across available sources
+    #    Canonical order: Depth Normalization -> Cell-Cycle Regression -> HVG Selection
     df_rna_raw, cohort_sources = load_expression_backwards_compatible(
         qc_df=qc_df,
         exp_dir=args.exp_dir,
@@ -1260,12 +1342,17 @@ def main():
         n_hvg=args.n_hvg,
         hvg_method=args.hvg_method,
         min_cells_per_gene=args.min_cells_per_gene,
+        depth_norm=args.depth_norm,
+        regress_cell_cycle=args.regress_cell_cycle,
+        out_dir=args.out_dir,
+        step_prefix="04",
     )
 
-    # Optional cited cell-cycle and/or custom gene exclusion (applied prior to depth adjustment & Spearman correlation)
+    # Optional cited cell-cycle and/or custom gene exclusion (applied AFTER depth norm & CC scoring/regression)
     if args.exclude_cell_cycle or args.exclude_genes_file or args.exclude_genes:
         from cell_cycle import filter_excluded_genes
         audit_path = os.path.join(args.out_dir, "04_excluded_genes_audit.csv")
+        cc_attrs = df_rna_raw.attrs.get("cc_scores_df", None)
         keep_mask, _ = filter_excluded_genes(
             df_rna_raw.columns,
             exclude_cell_cycle=args.exclude_cell_cycle,
@@ -1274,6 +1361,8 @@ def main():
             audit_csv_path=audit_path,
         )
         df_rna_raw = df_rna_raw.loc[:, keep_mask].copy()
+        if cc_attrs is not None:
+            df_rna_raw.attrs["cc_scores_df"] = cc_attrs
     else:
         print("[Gene Filter] No additional gene exclusions applied (original notebook baseline).")
 
@@ -1281,12 +1370,14 @@ def main():
     qc_aligned = qc_df.loc[df_rna_raw.index].copy()
     df_morph_raw = extract_morphology_features(qc_aligned)
 
-    # Harmonize across cohorts and adjust for per-cell library depth bias (unless --raw_ranks is set)
+    # Harmonize across cohorts, adjust for per-cell library depth/CDR bias (unless --raw_ranks is set),
+    # and enforce cell-cycle regression after depth adjustment if requested
     df_rna, df_morph = harmonize_and_adjust_modalities(
         df_rna_raw,
         df_morph_raw,
         cohort_sources=cohort_sources,
-        adjust_library_depth=not args.raw_ranks
+        adjust_library_depth=not args.raw_ranks,
+        regress_cell_cycle=args.regress_cell_cycle,
     )
 
     # 3. Compute Spearman rank correlations, BH-FDR q-values, and partial Spearman | ploidy

@@ -204,6 +204,20 @@ def main():
         help="HVG selection method in Steps 3, 4, 5, 5b ('default' keeps each step's baseline method)"
     )
     parser.add_argument(
+        "--depth_norm",
+        type=str,
+        default="cp10k_log1p",
+        choices=["cp10k_log1p", "none"],
+        help="Library-size depth normalization applied across Steps 2, 3, 4, 5, 5b before cell-cycle regression (default: cp10k_log1p)"
+    )
+    parser.add_argument(
+        "--regress_cell_cycle",
+        type=str,
+        default="none",
+        choices=["none", "full", "difference"],
+        help="Cell-cycle regression applied AFTER depth normalization across Steps 2, 3, 4, 5, 5b: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M)"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes (97 genes + legacy aliases)"
@@ -275,6 +289,8 @@ def main():
     print(f" QC Min Map %      : > {args.min_map_pc}")
     print(f" Min Cells / Gene  : {args.min_cells_per_gene}")
     print(f" HVG Selection     : n_hvg={args.n_hvg}, method='{args.hvg_method}'")
+    print(f" Depth Norm        : {args.depth_norm}")
+    print(f" Regress Cell Cycle: {args.regress_cell_cycle}")
     if any_exclusion:
         print(f" Exclude Cell Cycle: {args.exclude_cell_cycle}")
         if args.exclude_genes_file:
@@ -317,6 +333,8 @@ def main():
             "--gene", args.gene,
             "--exp_dir", exp_train_dir,
             "--out_dir", args.out_dir,
+            "--depth_norm", args.depth_norm,
+            "--regress_cell_cycle", args.regress_cell_cycle,
         ], "2")
         run_command(cmd)
 
@@ -327,6 +345,8 @@ def main():
             python_exe, "03_dimensionality_reduction.py",
             "--exp_dir", exp_train_dir,
             "--out_dir", args.out_dir,
+            "--depth_norm", args.depth_norm,
+            "--regress_cell_cycle", args.regress_cell_cycle,
             "--n_hvg", str(args.n_hvg),
             "--hvg_method", args.hvg_method,
             "--min_cells_per_gene", str(args.min_cells_per_gene),
@@ -345,6 +365,8 @@ def main():
             "--out_dir", args.out_dir,
             "--min_mapped_reads", str(args.min_mapped_reads),
             "--min_map_pc", str(args.min_map_pc),
+            "--depth_norm", args.depth_norm,
+            "--regress_cell_cycle", args.regress_cell_cycle,
             "--n_hvg", str(args.n_hvg),
             "--hvg_method", args.hvg_method,
             "--min_cells_per_gene", str(args.min_cells_per_gene),
@@ -361,6 +383,8 @@ def main():
             "--factors", str(args.mofa_factors),
             "--rna_likelihood", args.rna_likelihood,
             "--rna_norm", args.rna_norm,
+            "--depth_norm", args.depth_norm,
+            "--regress_cell_cycle", args.regress_cell_cycle,
             "--n_hvg", str(args.n_hvg),
             "--hvg_method", args.hvg_method,
             "--min_cells_per_gene", str(args.min_cells_per_gene),
@@ -374,6 +398,8 @@ def main():
             python_exe, "05b_mvae_multimodal_analysis.py",
             "--exp_dir", exp_train_dir,
             "--out_dir", args.out_dir,
+            "--depth_norm", args.depth_norm,
+            "--regress_cell_cycle", args.regress_cell_cycle,
             "--n_hvg", str(args.n_hvg),
             "--hvg_method", args.hvg_method,
             "--min_cells_per_gene", str(args.min_cells_per_gene),

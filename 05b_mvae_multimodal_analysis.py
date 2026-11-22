@@ -160,6 +160,8 @@ def load_mvae_data(
     n_hvg=2000,
     hvg_method="default",
     min_cells_per_gene=0,
+    depth_norm="cp10k_log1p",
+    regress_cell_cycle="none",
     exclude_cell_cycle=False,
     exclude_genes_file=None,
     exclude_genes=None,
@@ -190,6 +192,7 @@ def load_mvae_data(
             raise FileNotFoundError("Metadata table not found for MVAE training.")
 
     # Load barcode-aligned expression across all available cohorts (10x + MOFA HDF5 fallback)
+    # Canonical order: Depth Normalization -> Cell-Cycle Regression -> HVG Selection
     df_rna, cohort_sources = corr_mod.load_expression_backwards_compatible(
         meta_df,
         exp_dir=exp_dir,
@@ -198,12 +201,17 @@ def load_mvae_data(
         n_hvg=n_hvg,
         hvg_method=hvg_method,
         min_cells_per_gene=min_cells_per_gene,
+        depth_norm=depth_norm,
+        regress_cell_cycle=regress_cell_cycle,
+        out_dir=out_dir,
+        step_prefix="05b_mvae",
     )
 
-    # Optional cited cell-cycle and/or custom gene exclusion
+    # Optional cited cell-cycle and/or custom gene exclusion (after CC scoring/regression)
     if exclude_cell_cycle or exclude_genes_file or exclude_genes:
         from cell_cycle import filter_excluded_genes
         audit_path = os.path.join(out_dir, "05b_mvae_excluded_genes_audit.csv") if out_dir else None
+        cc_attrs = df_rna.attrs.get("cc_scores_df", None)
         keep_mask, _ = filter_excluded_genes(
             df_rna.columns,
             exclude_cell_cycle=exclude_cell_cycle,
@@ -212,6 +220,8 @@ def load_mvae_data(
             audit_csv_path=audit_path,
         )
         df_rna = df_rna.loc[:, keep_mask].copy()
+        if cc_attrs is not None:
+            df_rna.attrs["cc_scores_df"] = cc_attrs
     else:
         print("[Gene Filter] MVAE RNA View: No additional gene exclusions applied (baseline).")
 
@@ -219,7 +229,10 @@ def load_mvae_data(
     if len(common_cells) == 0:
         raise ValueError("No overlapping cell barcodes found between QC metadata and expression matrices.")
 
+    cc_attrs = df_rna.attrs.get("cc_scores_df", None)
     df_rna = df_rna.loc[common_cells].copy()
+    if cc_attrs is not None:
+        df_rna.attrs["cc_scores_df"] = cc_attrs.reindex(common_cells)
     meta_df = meta_df.loc[common_cells].copy()
     cohort_sources = cohort_sources.loc[common_cells].copy()
 
@@ -227,7 +240,11 @@ def load_mvae_data(
 
     # Cohort-level z-score harmonization of morphology (matching multi-cohort RNA scaling)
     df_rna_h, img_df_h = corr_mod.harmonize_and_adjust_modalities(
-        df_rna, img_df, cohort_sources, adjust_library_depth=False
+        df_rna,
+        img_df,
+        cohort_sources,
+        adjust_library_depth=False,
+        regress_cell_cycle=regress_cell_cycle,
     )
 
     scaler_rna = StandardScaler()
@@ -414,6 +431,20 @@ def main():
         help="Minimum number of cells expressing a gene (> 0 counts) required before HVG selection (default: 0, disabled)"
     )
     parser.add_argument(
+        "--depth_norm",
+        type=str,
+        default="cp10k_log1p",
+        choices=["cp10k_log1p", "none"],
+        help="Library-size depth normalization before cell-cycle regression & HVG selection (default: cp10k_log1p)"
+    )
+    parser.add_argument(
+        "--regress_cell_cycle",
+        type=str,
+        default="none",
+        choices=["none", "full", "difference"],
+        help="Cell-cycle regression after depth normalization: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M)"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before MVAE HVG selection"
@@ -449,6 +480,8 @@ def main():
         n_hvg=args.n_hvg,
         hvg_method=args.hvg_method,
         min_cells_per_gene=args.min_cells_per_gene,
+        depth_norm=args.depth_norm,
+        regress_cell_cycle=args.regress_cell_cycle,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,
         exclude_genes=args.exclude_genes,

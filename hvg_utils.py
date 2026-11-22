@@ -69,6 +69,8 @@ def select_hvgs(
     hvg_method: str = "raw_var",
     min_cells_per_gene: int = 0,
     extra_keep_genes: Optional[Iterable[str]] = None,
+    already_log_normalized: bool = False,
+    raw_counts_for_filter: Optional[pd.DataFrame] = None,
 ) -> pd.Index:
     """
     Applies optional `min_cells_per_gene` filtering and selects up to `n_hvg` highly
@@ -77,7 +79,7 @@ def select_hvgs(
     Parameters
     ----------
     df_counts : pd.DataFrame
-        Cells x Genes expression matrix.
+        Cells x Genes expression matrix (raw counts or depth-normalized/regressed expression).
     n_hvg : int
         Maximum number of highly variable genes to select.
     hvg_method : str
@@ -86,6 +88,12 @@ def select_hvgs(
         Minimum number of cells with expression > 0 required to retain a gene before HVG selection.
     extra_keep_genes : iterable of str, optional
         Gene symbols (case-insensitive) to force-retain if present after `min_cells_per_gene` filtering.
+    already_log_normalized : bool
+        If True, `df_counts` is already CP10K + log1p normalized (so `log1p_var` and `seurat`
+        will not re-apply CP10K + log1p).
+    raw_counts_for_filter : pd.DataFrame, optional
+        Optional un-regressed raw count matrix aligned to `df_counts` used for exact
+        `min_cells_per_gene` (> 0 counts) filtering and `seurat_v3` raw-count variance estimation.
 
     Returns
     -------
@@ -95,7 +103,13 @@ def select_hvgs(
     if n_hvg <= 0:
         raise ValueError(f"--n_hvg must be a positive integer, got {n_hvg}.")
 
-    df_filt = filter_genes_by_min_cells(df_counts, min_cells_per_gene=min_cells_per_gene)
+    if raw_counts_for_filter is not None and min_cells_per_gene and min_cells_per_gene > 0:
+        raw_aligned = raw_counts_for_filter.reindex(index=df_counts.index, columns=df_counts.columns).fillna(0.0)
+        keep_cols = filter_genes_by_min_cells(raw_aligned, min_cells_per_gene=min_cells_per_gene).columns
+        df_filt = df_counts[keep_cols]
+    else:
+        df_filt = filter_genes_by_min_cells(df_counts, min_cells_per_gene=min_cells_per_gene)
+
     n_avail = df_filt.shape[1]
     n_target = min(int(n_hvg), n_avail)
 
@@ -108,7 +122,7 @@ def select_hvgs(
             top_genes = active.nlargest(min(n_target, len(active))).index
 
     elif hvg_method == "log1p_var":
-        df_log = _cp10k_log1p(df_filt)
+        df_log = df_filt if already_log_normalized else _cp10k_log1p(df_filt)
         gene_vars = df_log.var(axis=0)
         active = gene_vars[gene_vars > 0]
         if len(active) == 0:
@@ -128,7 +142,7 @@ def select_hvgs(
         else:
             n_req = min(n_target, df_active.shape[1])
             if hvg_method == "seurat":
-                df_log = _cp10k_log1p(df_active)
+                df_log = df_active if already_log_normalized else _cp10k_log1p(df_active)
                 adata_tmp = ad.AnnData(
                     X=df_log.values.astype(np.float32),
                     obs=pd.DataFrame(index=df_active.index.astype(str)),
@@ -140,8 +154,12 @@ def select_hvgs(
                     flavor="seurat",
                 )
             else:
+                if raw_counts_for_filter is not None:
+                    df_v3 = raw_counts_for_filter.reindex(index=df_active.index, columns=df_active.columns).fillna(0.0)
+                else:
+                    df_v3 = df_active
                 adata_tmp = ad.AnnData(
-                    X=df_active.clip(lower=0).values.astype(np.float32),
+                    X=df_v3.clip(lower=0).values.astype(np.float32),
                     obs=pd.DataFrame(index=df_active.index.astype(str)),
                     var=pd.DataFrame(index=df_active.columns.astype(str)),
                 )

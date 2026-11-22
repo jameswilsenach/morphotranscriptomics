@@ -40,16 +40,24 @@ def setup_plot_style():
 def load_and_preprocess_anndata(
     exp_dir,
     qc_meta_path=None,
+    depth_norm="cp10k_log1p",
+    regress_cell_cycle="none",
     exclude_cell_cycle=False,
     exclude_genes_file=None,
     exclude_genes=None,
     out_dir=None,
 ):
     """
-    Loads 10x expression matrix into Scanpy AnnData, applies gene filters
-    (ribosomal/Unnamed plus optional cited cell-cycle or custom gene exclusion),
-    and merges QC-passed metadata.
+    Loads 10x expression matrix into Scanpy AnnData, filters ribosomal/Unnamed genes,
+    aligns to QC-passed cells, and applies the canonical preprocessing order:
+      1. Depth normalization (`depth_norm`)
+      2. Cell-cycle scoring & regression (`regress_cell_cycle`)
+      3. Optional gene exclusion (`--exclude_cell_cycle`, `--exclude_genes*`)
+    Raw counts are preserved in `adata.layers["raw_counts"]` for exact `min_cells_per_gene`
+    filtering and `seurat_v3` HVG selection.
     """
+    from preprocessing import preprocess_rna_matrix
+
     if not os.path.exists(exp_dir):
         for fallback in [os.path.join("data", "exp"), "exp"]:
             if os.path.exists(fallback):
@@ -66,22 +74,7 @@ def load_and_preprocess_anndata(
     genes_to_keep = ~(is_ribo | is_unnamed)
     adata = adata[:, genes_to_keep].copy()
 
-    # Optional cited cell-cycle and/or custom gene exclusion
-    if exclude_cell_cycle or exclude_genes_file or exclude_genes:
-        from cell_cycle import filter_excluded_genes
-        audit_path = os.path.join(out_dir, "03_excluded_genes_audit.csv") if out_dir else None
-        keep_mask, _ = filter_excluded_genes(
-            adata.var_names,
-            exclude_cell_cycle=exclude_cell_cycle,
-            exclude_genes_file=exclude_genes_file,
-            exclude_genes=exclude_genes,
-            audit_csv_path=audit_path,
-        )
-        adata = adata[:, keep_mask].copy()
-    else:
-        print("[Gene Filter] No additional gene exclusions applied (original notebook baseline).")
-
-    # Merge QC metadata if available
+    # Merge QC metadata BEFORE normalization/regression so statistics are computed on QC-passed cells
     if qc_meta_path and os.path.exists(qc_meta_path):
         qc_meta = pd.read_csv(qc_meta_path, index_col=0)
         common_cells = adata.obs_names.intersection(qc_meta.index)
@@ -96,25 +89,52 @@ def load_and_preprocess_anndata(
     if "Supervised_ploidy" not in adata.obs.columns:
         adata.obs["Supervised_ploidy"] = "Unknown"
 
+    # Canonical order: Depth Normalization -> Cell-Cycle Regression -> Optional Gene Exclusion
+    df_raw = adata.to_df()
+    df_proc, _ = preprocess_rna_matrix(
+        df_raw,
+        depth_norm=depth_norm,
+        regress_cell_cycle=regress_cell_cycle,
+        exclude_cell_cycle=exclude_cell_cycle,
+        exclude_genes_file=exclude_genes_file,
+        exclude_genes=exclude_genes,
+        out_dir=out_dir,
+        step_prefix="03",
+    )
+
+    adata = adata[:, df_proc.columns].copy()
+    adata.layers["raw_counts"] = df_raw[df_proc.columns].values.astype(np.float32)
+    adata.X = df_proc.values.astype(np.float32)
+    adata.uns["depth_norm"] = depth_norm
+    adata.uns["regress_cell_cycle"] = regress_cell_cycle
+
     return adata
 
 
 def compute_hvg_pca_umap(adata, n_top_genes=2000, hvg_method="default", min_cells_per_gene=0):
     """
-    Filters genes by optional minimum cell prevalence, selects top HVGs, scales data,
-    and calculates PCA and UMAP embeddings.
+    Filters genes by optional minimum cell prevalence (on raw counts), selects top HVGs,
+    scales data, and calculates PCA and UMAP embeddings.
     """
     from hvg_utils import resolve_hvg_method, select_hvgs
 
-    df_raw = adata.to_df()
-    method = resolve_hvg_method(hvg_method, default_method="raw_var")
+    df_expr = adata.to_df()
+    df_raw_for_filter = (
+        pd.DataFrame(adata.layers["raw_counts"], index=adata.obs_names, columns=adata.var_names)
+        if "raw_counts" in adata.layers
+        else None
+    )
+    already_log = adata.uns.get("depth_norm", "none") == "cp10k_log1p"
+    method = resolve_hvg_method(hvg_method, default_method="log1p_var" if already_log else "raw_var")
     top_hvg = select_hvgs(
-        df_raw,
+        df_expr,
         n_hvg=n_top_genes,
         hvg_method=method,
         min_cells_per_gene=min_cells_per_gene,
+        already_log_normalized=already_log,
+        raw_counts_for_filter=df_raw_for_filter,
     )
-    df_hvg = df_raw[top_hvg]
+    df_hvg = df_expr[top_hvg]
 
     # Standard scale
     scaler = StandardScaler()
@@ -221,6 +241,20 @@ def main():
     parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
     parser.add_argument(
+        "--depth_norm",
+        type=str,
+        default="cp10k_log1p",
+        choices=["cp10k_log1p", "none"],
+        help="Library-size depth normalization before cell-cycle regression & HVG selection (default: cp10k_log1p)"
+    )
+    parser.add_argument(
+        "--regress_cell_cycle",
+        type=str,
+        default="none",
+        choices=["none", "full", "difference"],
+        help="Cell-cycle regression after depth normalization: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M)"
+    )
+    parser.add_argument(
         "--n_hvg",
         type=int,
         default=2000,
@@ -271,6 +305,8 @@ def main():
     adata = load_and_preprocess_anndata(
         args.exp_dir,
         qc_meta_path,
+        depth_norm=args.depth_norm,
+        regress_cell_cycle=args.regress_cell_cycle,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,
         exclude_genes=args.exclude_genes,

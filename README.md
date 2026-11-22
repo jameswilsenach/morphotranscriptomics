@@ -98,6 +98,7 @@ morphotranscriptomics/
 ├── leave_one_animal_out_cv.py               # Step CV (cv/loaocv)    : Leave-One-Animal-Out Cross-Validation (LOAOCV)
 ├── cell_cycle.py                            # Shared cited cell-cycle & custom gene exclusion utilities
 ├── hvg_utils.py                             # Shared gene prevalence (--min_cells_per_gene) & HVG selection utilities
+├── preprocessing.py                         # Unified Depth Norm (--depth_norm) -> Cell-Cycle Regression (--regress_cell_cycle)
 └── run_master_analysis.py                   # Master CLI Pipeline Runner
 ```
 
@@ -205,22 +206,22 @@ morphotranscriptomics/
 
 ---
 
-## 🔬 Cell Cycle Gene Lists & Phase Regression Methodology (Citations)
+## 🔬 Normalization Order, Cell-Cycle Regression & Gene Filtering (Citations)
 
-This pipeline provides optional, auditable cell-cycle gene filtering via `cell_cycle.py` across **Steps 2, 3, 4, 5, and 5b** (`--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`, `--exclude_steps`).
+All RNA-consuming pipeline stages (**Steps 2, 3, 4, 5, and 5b**) share a unified preprocessing pipeline (`preprocessing.py`) executed in the canonical order:
+1. **Depth Normalization (`--depth_norm`)**: Defaults to `cp10k_log1p` (library-size normalization to 10,000 counts per cell + $\log(1+x)$). Pass `--depth_norm none` to reproduce legacy raw-count baselines.
+2. **Cell-Cycle Scoring & Linear Regression (`--regress_cell_cycle`)**: Computed *after* depth normalization (and *before* optional gene exclusion) using the cited Tirosh et al. (2016) / Seurat `cc.genes.updated.2019` S and G2/M gene lists:
+   - `none` *(default)*: No cell-cycle regression applied.
+   - `full`: Regresses out both `S_score` and `G2M_score` via OLS (`*_cell_cycle_scores.csv` audit log saved).
+   - `difference`: Regresses out `CC_difference = S_score - G2M_score` via OLS (removes S vs. G2/M phase variation while preserving cycling vs. non-cycling / endomitotic state separation).
+   - *Step 5 (MOFA2)*: Because MOFA2's Poisson/Bernoulli likelihoods require non-negative integer / binary counts, requesting `--regress_cell_cycle` automatically switches MOFA2's RNA likelihood to `gaussian` with a clear log warning.
+3. **Optional Gene Exclusion (`--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`, `--exclude_steps`)**: Independent of regression; removes the cited 97 cell-cycle genes (+ 6 legacy aliases) or custom gene lists via `cell_cycle.py`, logging every excluded gene to `*_excluded_genes_audit.csv`.
 
 ### Cited Seurat Cell-Cycle Gene Lists
 - **Tirosh et al. (2016) / Seurat `cc.genes`**: Canonical human cell-cycle gene signature comprising **43 S-phase** and **54 G2/M-phase** markers (97 genes total) derived from single-cell RNA-seq of proliferating cells (Tirosh et al., 2016, *Science* 352(6282):189–196, DOI: [10.1126/science.aad0501](https://doi.org/10.1126/science.aad0501)).
 - **Seurat `cc.genes.updated.2019`**: Updated HGNC gene symbols introduced in Seurat v3 (Butler et al., 2018, *Nature Biotechnology* 36:411–420, DOI: [10.1038/nbt.4096](https://doi.org/10.1038/nbt.4096); Stuart et al., 2019, *Cell* 177(7):1888–1902, DOI: [10.1016/j.cell.2019.05.031](https://doi.org/10.1016/j.cell.2019.05.031)). In `cell_cycle.py`, all 97 canonical mouse ortholog symbols (`TIROSH_2016_S_GENES_MOUSE`, `TIROSH_2016_G2M_GENES_MOUSE`) plus **6 legacy GRCm38/Tirosh aliases** (`Mlf1ip`→`Cenpu`, `Rpa2`→`Polr1b`, `Brip1`→`Mrpl36`, `Mcm2`→`Mcm7`, `Fam64a`→`Pimreg`, `Hn1`→`Jpt1`) are matched case-insensitively to prevent silent misses across older and newer genome annotations.
 
-### Standard Seurat Phase Scoring & Regression Procedures vs. Endomitotic Megakaryocytes
-In standard proliferating diploid scRNA-seq workflows, Seurat's **Cell-Cycle Scoring and Regression** procedure (Satija Lab vignette; Butler et al., 2018; Stuart et al., 2019) proceeds in two stages:
-1. **Scoring & Discrete Phase Assignment**: `CellCycleScoring(s.features = cc.genes.updated.2019$s.genes, g2m.features = cc.genes.updated.2019$g2m.genes)` computes continuous `S.Score` and `G2M.Score` module scores per cell and assigns discrete `G1`, `S`, or `G2M` phases.
-2. **Linear Phase Regression**:
-   - *Full cell-cycle removal*: `ScaleData(vars.to.regress = c("S.Score", "G2M.Score"))` regresses out both S and G2/M scores to remove all cell-cycle variance.
-   - *Difference-score regression (alternate workflow)*: `CC.Difference <- S.Score - G2M.Score` followed by `ScaleData(vars.to.regress = "CC.Difference")` removes phase differences among actively cycling cells while preserving separation between quiescent (`G1`) and cycling cells.
-
-**Why this pipeline uses explicit gene-list filtering instead of diploid phase regression**: Megakaryocytes undergo **endomitosis** (aborted mitosis without cytokinesis to reach $4\text{n}$–$32\text{n}+$ ploidy). Applying diploid mitotic phase classifiers (`G1`/`S`/`G2M`) or regressing out `S.Score`/`G2M.Score` risks over-specifying endomitotic states and inadvertently removing genuine polyploidization biology (Luecken & Theis, 2019, *Molecular Systems Biology* 15(6):e8746, DOI: [10.15252/msb.20188746](https://doi.org/10.15252/msb.20188746)). Instead, this pipeline keeps the original unfiltered baseline by default and offers transparent, reproducible gene-list exclusion with per-step audit logs (`*_excluded_genes_audit.csv`).
+**Note on endomitotic megakaryocytes**: Megakaryocytes undergo **endomitosis** (aborted mitosis without cytokinesis to reach $4\text{n}$–$32\text{n}+$ ploidy). Because full `S + G2M` regression can attenuate genuine polyploidization biology (Luecken & Theis, 2019, *Molecular Systems Biology* 15(6):e8746, DOI: [10.15252/msb.20188746](https://doi.org/10.15252/msb.20188746)), cell-cycle regression defaults to `none` and both `difference` (`S - G2M`) and `full` (`S + G2M`) modes — as well as explicit gene-list exclusion (`--exclude_cell_cycle`) — are provided for transparent sensitivity comparisons.
 
 ### Library-Depth / Cellular Detection Rate (CDR) Adjustment
 In megakaryocyte index-sorting, larger polyploid cells (`16n`, `32n`) exhibit lower total mapped read counts / higher dropout ($\text{Spearman}(\text{lib\_size}, \text{Size}) \approx -0.54$). Because global RNA complexity may reflect either genuine maturation-associated transcriptional specialization or technical capture/shearing bias, the pipeline supports comparing **unadjusted** expression alongside **per-cohort library-depth / Cellular Detection Rate (CDR) residualization** (regressing per-cell mean standardized expression out of each gene and re-standardizing, following the CDR covariate adjustment framework of **Finak et al., 2015**, *Genome Biology* 16:278, DOI: [10.1186/s13059-015-0844-5](https://doi.org/10.1186/s13059-015-0844-5)).
@@ -244,8 +245,14 @@ You can run the entire pipeline end-to-end or individual steps using **`run_mast
 # Activate environment
 conda activate sc-analysis
 
-# Run FULL pipeline end-to-end using default local data/ directory:
+# Run FULL pipeline end-to-end using default local data/ directory (CP10K+log1p depth norm by default):
 python run_master_analysis.py --out_dir "output" --gene kalrn
+
+# Run with Depth Normalization -> Cell-Cycle Regression across ALL RNA analyses (Steps 2, 3, 4, 5, 5b):
+#   --depth_norm: cp10k_log1p (default) | none
+#   --regress_cell_cycle: none (default) | full (S + G2M) | difference (S - G2M)
+python run_master_analysis.py --depth_norm cp10k_log1p --regress_cell_cycle difference --out_dir "output_cc_diff"
+python run_master_analysis.py --step correlations --depth_norm cp10k_log1p --regress_cell_cycle full --out_dir "output_cc_full"
 
 # Refine read-count QC, gene prevalence, and HVG selection criteria end-to-end:
 #   --min_mapped_reads (default: 20000), --min_map_pc (default: 50.0),

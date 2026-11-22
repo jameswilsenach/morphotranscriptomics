@@ -169,36 +169,82 @@ def map_barcodes_to_fcs_cvw(cell_df):
     return cell_df
 
 
-def rank_gene_expression(gene_symbol, matrix, features_df, barcodes, qc_meta_path=None, n=10):
+def rank_gene_expression(
+    gene_symbol,
+    matrix,
+    features_df,
+    barcodes,
+    qc_meta_path=None,
+    n=10,
+    depth_norm="cp10k_log1p",
+    regress_cell_cycle="none",
+    exclude_cell_cycle=False,
+    exclude_genes_file=None,
+    exclude_genes=None,
+    out_dir=None,
+):
     """
     Vectorized extraction of top-N and bottom-N cell expression ranks for target gene.
-    Integrates QC filtering metadata if available.
+    Applies unified preprocessing (Depth Normalization -> Cell-Cycle Regression ->
+    Optional Gene Exclusions) on QC-passed cells before ranking.
     """
-    match_mask = features_df["gene_symbol"].str.lower() == gene_symbol.lower()
-    matching_genes = features_df[match_mask]
+    from preprocessing import preprocess_rna_matrix
 
-    if matching_genes.empty:
-        partial_mask = features_df["gene_symbol"].str.lower().str.contains(gene_symbol.lower())
-        matching_genes = features_df[partial_mask]
-        if matching_genes.empty:
-            raise ValueError(f"Gene symbol '{gene_symbol}' not found in feature annotations.")
+    # Build (cells x genes) DataFrame on QC-passed cells first
+    qc_meta = None
+    if qc_meta_path and os.path.exists(qc_meta_path):
+        qc_meta = pd.read_csv(qc_meta_path)
 
-    gene_row_idx = matching_genes.index[0]
-    matched_id = matching_genes.iloc[0]["gene_id"]
-    matched_symbol = matching_genes.iloc[0]["gene_symbol"]
-    print(f"Target Gene Identified: '{matched_symbol}' (ID: {matched_id}, Row Index: {gene_row_idx})")
+    bc_series = pd.Series(barcodes, dtype=str)
+    if qc_meta is not None and "SampleID" in qc_meta.columns:
+        qc_ids = set(qc_meta["SampleID"].astype(str))
+        if "qc_pass" in qc_meta.columns:
+            qc_ids = set(qc_meta.loc[qc_meta["qc_pass"] == True, "SampleID"].astype(str))
+        cell_mask = bc_series.isin(qc_ids).values
+        if cell_mask.any():
+            cell_indices = np.where(cell_mask)[0]
+        else:
+            cell_indices = np.arange(len(barcodes))
+    else:
+        cell_indices = np.arange(len(barcodes))
 
-    # Extract expression vector
-    gene_expr = matrix[gene_row_idx, :].toarray().ravel()
+    gene_symbols = features_df["gene_symbol"].astype(str).values
+    mat_qc = matrix[:, cell_indices].T.toarray().astype(np.float64)
+    df_counts = pd.DataFrame(mat_qc, index=barcodes[cell_indices], columns=gene_symbols)
+    if df_counts.columns.duplicated().any():
+        df_counts = df_counts.loc[:, ~df_counts.columns.duplicated(keep="first")]
+
+    # Canonical order: Depth Normalization -> Cell-Cycle Regression -> Gene Exclusion
+    df_proc, _ = preprocess_rna_matrix(
+        df_counts,
+        depth_norm=depth_norm,
+        regress_cell_cycle=regress_cell_cycle,
+        exclude_cell_cycle=exclude_cell_cycle,
+        exclude_genes_file=exclude_genes_file,
+        exclude_genes=exclude_genes,
+        out_dir=out_dir,
+        step_prefix="02",
+    )
+
+    cols_lower = pd.Series(df_proc.columns, dtype=str).str.lower()
+    exact_hits = df_proc.columns[cols_lower == gene_symbol.lower()].tolist()
+    if exact_hits:
+        matched_symbol = exact_hits[0]
+    else:
+        partial_hits = df_proc.columns[cols_lower.str.contains(gene_symbol.lower())].tolist()
+        if not partial_hits:
+            raise ValueError(f"Gene symbol '{gene_symbol}' not found in preprocessed features.")
+        matched_symbol = partial_hits[0]
+
+    print(f"Target Gene Identified: '{matched_symbol}'")
 
     cell_df = pd.DataFrame({
-        "cell_barcode": barcodes,
-        "expression": gene_expr
+        "cell_barcode": df_proc.index.astype(str),
+        "expression": df_proc[matched_symbol].values,
     })
 
     # Merge QC metadata from Step 01 if available
-    if qc_meta_path and os.path.exists(qc_meta_path):
-        qc_meta = pd.read_csv(qc_meta_path)
+    if qc_meta is not None:
         cell_df = cell_df.merge(
             qc_meta,
             left_on="cell_barcode",
@@ -232,7 +278,7 @@ def rank_gene_expression(gene_symbol, matrix, features_df, barcodes, qc_meta_pat
     return ranked_df, matched_symbol
 
 
-def plot_expression_rankings(ranked_df, gene_symbol, out_dir):
+def plot_expression_rankings(ranked_df, gene_symbol, out_dir, depth_norm="cp10k_log1p", regress_cell_cycle="none"):
     """Generates publication quality ranking bar plot for top/bottom cells."""
     os.makedirs(out_dir, exist_ok=True)
     setup_plot_style()
@@ -248,9 +294,13 @@ def plot_expression_rankings(ranked_df, gene_symbol, out_dir):
         ax=ax
     )
 
+    ylab = "Expression (CP10K log1p)" if depth_norm == "cp10k_log1p" else "Raw Expression Count"
+    if regress_cell_cycle != "none":
+        ylab += f" [CC-regressed: {regress_cell_cycle}]"
+
     ax.set_title(f"Top & Bottom Expressing Cells for Gene '{gene_symbol}'", fontsize=13, fontweight="bold")
     ax.set_xlabel("Cell Barcode")
-    ax.set_ylabel("Raw Expression Count")
+    ax.set_ylabel(ylab)
     plt.xticks(rotation=45, ha="right")
 
     plt.tight_layout()
@@ -267,6 +317,20 @@ def main():
     parser.add_argument("--n", type=int, default=10, help="Number of top and bottom cells to select")
     parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
     parser.add_argument("--out_dir", type=str, default="output", help="Directory to save output files")
+    parser.add_argument(
+        "--depth_norm",
+        type=str,
+        default="cp10k_log1p",
+        choices=["cp10k_log1p", "none"],
+        help="Library-size depth normalization before ranking/regression (default: cp10k_log1p)"
+    )
+    parser.add_argument(
+        "--regress_cell_cycle",
+        type=str,
+        default="none",
+        choices=["none", "full", "difference"],
+        help="Cell-cycle regression after depth normalization: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M)"
+    )
     parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
@@ -289,19 +353,6 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"=== STEP 02: GENE EXPRESSION RANKINGS & CELL MAPPING ===")
 
-    # Load 10x matrix data
-    matrix, features_df, barcodes = load_10x_expression_data(args.exp_dir)
-
-    # Filter genes matching morphotrans2 rules (+ optional exclusions)
-    matrix, features_df, _ = filter_genes(
-        features_df,
-        matrix,
-        exclude_cell_cycle=args.exclude_cell_cycle,
-        exclude_genes_file=args.exclude_genes_file,
-        exclude_genes=args.exclude_genes,
-        out_dir=args.out_dir,
-    )
-
     # Check for prerequisite QC metadata from Step 01
     qc_meta_path = os.path.join(args.out_dir, "qc_filtered_metadata.csv")
     if not os.path.exists(qc_meta_path):
@@ -311,14 +362,33 @@ def main():
             f"  python run_master_analysis.py --step qc --out_dir \"{args.out_dir}\""
         )
 
-    # Extract expression ranks
+    # Load 10x matrix data
+    matrix, features_df, barcodes = load_10x_expression_data(args.exp_dir)
+
+    # Filter ribosomal and Unnamed genes first (optional exclusions run after depth norm & CC regression)
+    matrix, features_df, _ = filter_genes(
+        features_df,
+        matrix,
+        exclude_cell_cycle=False,
+        exclude_genes_file=None,
+        exclude_genes=None,
+        out_dir=args.out_dir,
+    )
+
+    # Extract expression ranks after unified preprocessing
     ranked_df, matched_symbol = rank_gene_expression(
         gene_symbol=args.gene,
         matrix=matrix,
         features_df=features_df,
         barcodes=barcodes,
         qc_meta_path=qc_meta_path,
-        n=args.n
+        n=args.n,
+        depth_norm=args.depth_norm,
+        regress_cell_cycle=args.regress_cell_cycle,
+        exclude_cell_cycle=args.exclude_cell_cycle,
+        exclude_genes_file=args.exclude_genes_file,
+        exclude_genes=args.exclude_genes,
+        out_dir=args.out_dir,
     )
 
     # Export structured CSV
@@ -332,7 +402,13 @@ def main():
     print(f"Successfully exported cell mapping to: {os.path.abspath(output_csv)}")
 
     # Generate ranking plot
-    plot_expression_rankings(ranked_df, matched_symbol, args.out_dir)
+    plot_expression_rankings(
+        ranked_df,
+        matched_symbol,
+        args.out_dir,
+        depth_norm=args.depth_norm,
+        regress_cell_cycle=args.regress_cell_cycle,
+    )
 
 
 if __name__ == "__main__":

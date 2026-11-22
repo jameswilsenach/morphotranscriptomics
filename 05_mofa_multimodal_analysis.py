@@ -175,6 +175,8 @@ def prepare_mofa_input_matrices(
     morph_likelihood="gaussian",
     rna_norm="raw_counts",
     log_morph=False,
+    depth_norm="cp10k_log1p",
+    regress_cell_cycle="none",
     adjust_library_depth=False,
     exclude_cell_cycle=False,
     exclude_genes_file=None,
@@ -207,6 +209,7 @@ def prepare_mofa_input_matrices(
             raise FileNotFoundError("Metadata table not found for morphology features.")
 
     # Load barcode-aligned expression across all available cohorts (10x + MOFA HDF5 fallback)
+    # Canonical order: Depth Normalization -> Cell-Cycle Regression -> HVG Selection
     df_rna, cohort_sources = corr_mod.load_expression_backwards_compatible(
         meta_df,
         exp_dir=exp_dir,
@@ -215,12 +218,17 @@ def prepare_mofa_input_matrices(
         n_hvg=n_hvg,
         hvg_method=hvg_method,
         min_cells_per_gene=min_cells_per_gene,
+        depth_norm=depth_norm,
+        regress_cell_cycle=regress_cell_cycle,
+        out_dir=out_dir,
+        step_prefix="05_mofa",
     )
 
-    # Optional cited cell-cycle and/or custom gene exclusion
+    # Optional cited cell-cycle and/or custom gene exclusion (after CC scoring/regression)
     if exclude_cell_cycle or exclude_genes_file or exclude_genes:
         from cell_cycle import filter_excluded_genes
         audit_path = os.path.join(out_dir, "05_mofa_excluded_genes_audit.csv") if out_dir else None
+        cc_attrs = df_rna.attrs.get("cc_scores_df", None)
         keep_mask, _ = filter_excluded_genes(
             df_rna.columns,
             exclude_cell_cycle=exclude_cell_cycle,
@@ -229,6 +237,8 @@ def prepare_mofa_input_matrices(
             audit_csv_path=audit_path,
         )
         df_rna = df_rna.loc[:, keep_mask].copy()
+        if cc_attrs is not None:
+            df_rna.attrs["cc_scores_df"] = cc_attrs
     else:
         print("[Gene Filter] MOFA2 RNA View: No additional gene exclusions applied (baseline).")
 
@@ -236,24 +246,41 @@ def prepare_mofa_input_matrices(
     if len(common_cells) == 0:
         raise ValueError("No overlapping cell barcodes found between QC metadata and expression matrices.")
 
+    cc_attrs = df_rna.attrs.get("cc_scores_df", None)
     df_rna = df_rna.loc[common_cells].copy()
+    if cc_attrs is not None:
+        df_rna.attrs["cc_scores_df"] = cc_attrs.reindex(common_cells)
     meta_df = meta_df.loc[common_cells].copy()
     cohort_sources = cohort_sources.loc[common_cells].copy()
 
     img_df = corr_mod.extract_morphology_features(meta_df)
 
-    # Multi-cohort RNA from load_expression_backwards_compatible is already z-scored (Gaussian)
+    # Multi-cohort z-scored RNA, CDR residualization, or cell-cycle regression requires Gaussian likelihood
     effective_rna_likelihood = rna_likelihood
     is_prescaled = bool((df_rna.values < 0).any())
-    if is_prescaled or adjust_library_depth:
+    if regress_cell_cycle != "none" or is_prescaled or adjust_library_depth:
         if rna_likelihood != "gaussian":
-            reason = "library-depth residualization" if adjust_library_depth else "multi-cohort z-scored HDF5 + 10x alignment"
-            print(f"[MOFA2] Notice: Switching RNA likelihood '{rna_likelihood}' -> 'gaussian' ({reason}).")
+            reasons = []
+            if regress_cell_cycle != "none":
+                reasons.append(f"cell-cycle regression ('{regress_cell_cycle}')")
+            if adjust_library_depth:
+                reasons.append("library-depth/CDR residualization")
+            if is_prescaled and not reasons:
+                reasons.append("multi-cohort z-scored HDF5 + 10x alignment")
+            print(
+                f"[MOFA2] Warning: Switching RNA likelihood '{rna_likelihood}' -> 'gaussian' "
+                f"({'; '.join(reasons)} produces continuous values incompatible with {rna_likelihood})."
+            )
             effective_rna_likelihood = "gaussian"
 
-    # Harmonize morphology across cohorts and optionally residualize per-cell library depth (Finak et al., 2015)
+    # Harmonize morphology across cohorts, optionally residualize per-cell library depth (Finak et al., 2015),
+    # and enforce cell-cycle regression strictly after depth adjustment
     df_rna_h, img_df_h = corr_mod.harmonize_and_adjust_modalities(
-        df_rna, img_df, cohort_sources, adjust_library_depth=adjust_library_depth
+        df_rna,
+        img_df,
+        cohort_sources,
+        adjust_library_depth=adjust_library_depth,
+        regress_cell_cycle=regress_cell_cycle,
     )
     if adjust_library_depth:
         print("[MOFA2] Applied per-cohort library-depth / CDR residualization to RNA view (Finak et al., 2015).")
@@ -801,6 +828,20 @@ def main():
         help="Optional pre-saved MOFA HDF5 path for M1-M5 expression alignment (auto-discovered in data/ if omitted)"
     )
     parser.add_argument(
+        "--depth_norm",
+        type=str,
+        default="cp10k_log1p",
+        choices=["cp10k_log1p", "none"],
+        help="Library-size depth normalization before cell-cycle regression & HVG selection (default: cp10k_log1p)"
+    )
+    parser.add_argument(
+        "--regress_cell_cycle",
+        type=str,
+        default="none",
+        choices=["none", "full", "difference"],
+        help="Cell-cycle regression after depth normalization: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M); automatically switches RNA likelihood to gaussian"
+    )
+    parser.add_argument(
         "--adjust_library_depth",
         action="store_true",
         help="Apply per-cohort library-depth / Cellular Detection Rate (CDR) residualization to RNA view (Finak et al., 2015)"
@@ -850,6 +891,8 @@ def main():
         morph_likelihood=args.morph_likelihood,
         rna_norm=args.rna_norm,
         log_morph=args.log_morph,
+        depth_norm=args.depth_norm,
+        regress_cell_cycle=args.regress_cell_cycle,
         adjust_library_depth=args.adjust_library_depth,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,
