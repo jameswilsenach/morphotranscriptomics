@@ -40,6 +40,9 @@ def setup_plot_style():
 def load_and_preprocess_anndata(
     exp_dir,
     qc_meta_path=None,
+    n_hvg=2000,
+    hvg_method="default",
+    min_cells_per_gene=0,
     depth_norm="cp10k_log1p",
     adjust_library_depth=False,
     regress_cell_cycle="none",
@@ -49,14 +52,91 @@ def load_and_preprocess_anndata(
     out_dir=None,
 ):
     """
-    Loads 10x expression matrix into Scanpy AnnData, filters ribosomal/Unnamed genes,
-    aligns to QC-passed cells, and applies the canonical preprocessing order:
+    Loads barcode-aligned single-cell expression across all available QC-passed cohorts
+    (e.g. all 393 cells across M1-M7 by combining 10x matrices and pre-saved MOFA HDF5
+    when needed), applies the canonical preprocessing order:
       1. Depth normalization (`depth_norm`)
-      2. Cell-cycle scoring & regression (`regress_cell_cycle`)
-      3. Optional gene exclusion (`--exclude_cell_cycle`, `--exclude_genes*`)
-    Raw counts are preserved in `adata.layers["raw_counts"]` for exact `min_cells_per_gene`
-    filtering and `seurat_v3` HVG selection.
+      2. Optional per-cohort library-depth / CDR residualization (`adjust_library_depth`)
+      3. Optional cell-cycle scoring & regression (`regress_cell_cycle`)
+      4. Optional gene exclusion (`--exclude_cell_cycle`, `--exclude_genes*`)
+    and returns a Scanpy AnnData object ready for PCA and UMAP.
     """
+    from importlib import import_module
+    corr_mod = import_module("04_morphology_gene_correlations")
+
+    if qc_meta_path and os.path.exists(qc_meta_path):
+        qc_meta = pd.read_csv(qc_meta_path, index_col=0)
+        if "SampleID" not in qc_meta.columns:
+            qc_meta["SampleID"] = qc_meta.index.astype(str)
+        qc_meta.index = qc_meta.index.astype(str)
+
+        df_rna, cohort_sources = corr_mod.load_expression_backwards_compatible(
+            qc_meta,
+            exp_dir=exp_dir,
+            pilot_exp_dir=os.path.join("data", "exp"),
+            n_hvg=n_hvg,
+            hvg_method=hvg_method,
+            min_cells_per_gene=min_cells_per_gene,
+            depth_norm=depth_norm,
+            regress_cell_cycle=regress_cell_cycle,
+            out_dir=out_dir,
+            step_prefix="03",
+        )
+
+        # Optional gene exclusion (after CC scoring/regression)
+        if exclude_cell_cycle or exclude_genes_file or exclude_genes:
+            from cell_cycle import filter_excluded_genes
+            audit_path = os.path.join(out_dir, "03_excluded_genes_audit.csv") if out_dir else None
+            cc_attrs = df_rna.attrs.get("cc_scores_df", None)
+            keep_mask, _ = filter_excluded_genes(
+                df_rna.columns,
+                exclude_cell_cycle=exclude_cell_cycle,
+                exclude_genes_file=exclude_genes_file,
+                exclude_genes=exclude_genes,
+                audit_csv_path=audit_path,
+            )
+            df_rna = df_rna.loc[:, keep_mask].copy()
+            if cc_attrs is not None:
+                df_rna.attrs["cc_scores_df"] = cc_attrs
+        else:
+            print("[Gene Filter] No additional gene exclusions applied (baseline).")
+
+        common_cells = qc_meta.index.intersection(df_rna.index)
+        cc_attrs = df_rna.attrs.get("cc_scores_df", None)
+        df_rna = df_rna.loc[common_cells].copy()
+        if cc_attrs is not None:
+            df_rna.attrs["cc_scores_df"] = cc_attrs.reindex(common_cells)
+        obs_df = qc_meta.loc[common_cells].copy()
+        cohort_sources = cohort_sources.loc[common_cells].copy()
+
+        # Optional per-cohort library-depth / CDR residualization (strictly before CC re-orthogonalization)
+        if adjust_library_depth:
+            dummy_morph = pd.DataFrame({"_dummy": np.arange(len(common_cells), dtype=float)}, index=common_cells)
+            df_rna, _ = corr_mod.harmonize_and_adjust_modalities(
+                df_rna,
+                dummy_morph,
+                cohort_sources,
+                adjust_library_depth=True,
+                regress_cell_cycle=regress_cell_cycle,
+            )
+            print("[Step 03] Applied per-cohort library-depth / CDR residualization (Finak et al., 2015).")
+
+        if "Supervised_ploidy" not in obs_df.columns:
+            obs_df["Supervised_ploidy"] = "Unknown"
+
+        adata = ad.AnnData(
+            X=df_rna.values.astype(np.float32),
+            obs=obs_df,
+            var=pd.DataFrame(index=df_rna.columns.astype(str)),
+        )
+        adata.uns["depth_norm"] = depth_norm
+        adata.uns["adjust_library_depth"] = bool(adjust_library_depth)
+        adata.uns["regress_cell_cycle"] = regress_cell_cycle
+        adata.uns["hvgs_already_selected"] = True
+        print(f"[Step 03] Aligned AnnData: {adata.n_obs} QC-passed cells x {adata.n_vars} genes.")
+        return adata
+
+    # Fallback when no qc_meta_path is provided
     from preprocessing import preprocess_rna_matrix
 
     if not os.path.exists(exp_dir):
@@ -68,29 +148,12 @@ def load_and_preprocess_anndata(
     print(f"Loading AnnData from: {os.path.abspath(exp_dir)}")
     adata = sc.read_10x_mtx(exp_dir)
     adata.var_names_make_unique()
-
-    # Gene filtering matching morphotrans2 rule
     is_ribo = adata.var_names.str.startswith(('Rps', 'Rpl'))
     is_unnamed = adata.var_names.str.startswith('Unnamed')
-    genes_to_keep = ~(is_ribo | is_unnamed)
-    adata = adata[:, genes_to_keep].copy()
-
-    # Merge QC metadata BEFORE normalization/regression so statistics are computed on QC-passed cells
-    if qc_meta_path and os.path.exists(qc_meta_path):
-        qc_meta = pd.read_csv(qc_meta_path, index_col=0)
-        common_cells = adata.obs_names.intersection(qc_meta.index)
-        if len(common_cells) > 0:
-            adata = adata[common_cells].copy()
-            for col in qc_meta.columns:
-                adata.obs[col] = qc_meta.loc[common_cells, col]
-            print(f"Filtered AnnData to {len(common_cells)} QC-passed cells.")
-        else:
-            print("Note: No barcode overlap with QC metadata table. Using all cells in matrix.")
-
+    adata = adata[:, ~(is_ribo | is_unnamed)].copy()
     if "Supervised_ploidy" not in adata.obs.columns:
         adata.obs["Supervised_ploidy"] = "Unknown"
 
-    # Canonical order: Depth Normalization -> Optional CDR -> Cell-Cycle Regression -> Optional Gene Exclusion
     df_raw = adata.to_df()
     df_proc, _ = preprocess_rna_matrix(
         df_raw,
@@ -103,52 +166,52 @@ def load_and_preprocess_anndata(
         out_dir=out_dir,
         step_prefix="03",
     )
-
     adata = adata[:, df_proc.columns].copy()
     adata.layers["raw_counts"] = df_raw[df_proc.columns].values.astype(np.float32)
     adata.X = df_proc.values.astype(np.float32)
     adata.uns["depth_norm"] = depth_norm
     adata.uns["adjust_library_depth"] = bool(adjust_library_depth)
     adata.uns["regress_cell_cycle"] = regress_cell_cycle
-
+    adata.uns["hvgs_already_selected"] = False
     return adata
 
 
 def compute_hvg_pca_umap(adata, n_top_genes=2000, hvg_method="default", min_cells_per_gene=0):
     """
-    Filters genes by optional minimum cell prevalence (on raw counts), selects top HVGs,
-    scales data, and calculates PCA and UMAP embeddings.
+    Selects top HVGs (if not already selected during multi-cohort loading), scales data,
+    and calculates PCA and UMAP embeddings.
     """
     from hvg_utils import resolve_hvg_method, select_hvgs
 
     df_expr = adata.to_df()
-    df_raw_for_filter = (
-        pd.DataFrame(adata.layers["raw_counts"], index=adata.obs_names, columns=adata.var_names)
-        if "raw_counts" in adata.layers
-        else None
-    )
-    already_log = adata.uns.get("depth_norm", "none") == "cp10k_log1p"
-    is_cdr_zscored = bool(adata.uns.get("adjust_library_depth", False))
-    method = resolve_hvg_method(hvg_method, default_method="log1p_var" if already_log else "raw_var")
-
-    # When CDR z-scoring was applied, every non-constant gene has unit variance (1.0),
-    # so rank HVGs on pre-CDR counts (via log1p_var / seurat / seurat_v3) before subsetting df_expr.
-    if is_cdr_zscored and df_raw_for_filter is not None:
-        hvg_input = df_raw_for_filter
-        hvg_already_log = False
+    if adata.uns.get("hvgs_already_selected", False):
+        df_hvg = df_expr
+        method = hvg_method
+        top_hvg = df_expr.columns
     else:
-        hvg_input = df_expr
-        hvg_already_log = already_log
-
-    top_hvg = select_hvgs(
-        hvg_input,
-        n_hvg=n_top_genes,
-        hvg_method=method,
-        min_cells_per_gene=min_cells_per_gene,
-        already_log_normalized=hvg_already_log,
-        raw_counts_for_filter=df_raw_for_filter,
-    )
-    df_hvg = df_expr[top_hvg]
+        df_raw_for_filter = (
+            pd.DataFrame(adata.layers["raw_counts"], index=adata.obs_names, columns=adata.var_names)
+            if "raw_counts" in adata.layers
+            else None
+        )
+        already_log = adata.uns.get("depth_norm", "none") == "cp10k_log1p"
+        is_cdr_zscored = bool(adata.uns.get("adjust_library_depth", False))
+        method = resolve_hvg_method(hvg_method, default_method="log1p_var" if already_log else "raw_var")
+        if is_cdr_zscored and df_raw_for_filter is not None:
+            hvg_input = df_raw_for_filter
+            hvg_already_log = False
+        else:
+            hvg_input = df_expr
+            hvg_already_log = already_log
+        top_hvg = select_hvgs(
+            hvg_input,
+            n_hvg=n_top_genes,
+            hvg_method=method,
+            min_cells_per_gene=min_cells_per_gene,
+            already_log_normalized=hvg_already_log,
+            raw_counts_for_filter=df_raw_for_filter,
+        )
+        df_hvg = df_expr[top_hvg]
 
     # Standard scale
     scaler = StandardScaler()
@@ -351,6 +414,9 @@ def main():
     adata = load_and_preprocess_anndata(
         args.exp_dir,
         qc_meta_path,
+        n_hvg=args.n_hvg,
+        hvg_method=args.hvg_method,
+        min_cells_per_gene=args.min_cells_per_gene,
         depth_norm=args.depth_norm,
         adjust_library_depth=args.adjust_library_depth,
         regress_cell_cycle=args.regress_cell_cycle,
