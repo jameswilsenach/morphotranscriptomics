@@ -283,7 +283,20 @@ def _read_10x_dir_as_dataframe(exp_dir, exclude_mt=False):
 
     print(f"[Expression] Loading 10x matrix from: {os.path.abspath(exp_dir)}")
     features_df = pd.read_csv(feat_path, sep="\t", header=None)
-    gene_symbols = features_df.iloc[:, 1].astype(str).values if features_df.shape[1] > 1 else features_df.iloc[:, 0].astype(str).values
+    raw_symbols = features_df.iloc[:, 1].astype(str).values if features_df.shape[1] > 1 else features_df.iloc[:, 0].astype(str).values
+
+    # Disambiguate duplicate gene symbols using Scanpy's var_names_make_unique() convention
+    # (e.g., duplicate 'Ptp4a1' -> 'Ptp4a1', 'Ptp4a1-1') so 10x matrices align 1-to-1 with HDF5 HVGs.
+    seen_counts = {}
+    unique_symbols = []
+    for sym in raw_symbols:
+        if sym in seen_counts:
+            seen_counts[sym] += 1
+            unique_symbols.append(f"{sym}-{seen_counts[sym]}")
+        else:
+            seen_counts[sym] = 0
+            unique_symbols.append(sym)
+    gene_symbols = np.array(unique_symbols, dtype=object)
 
     barcodes_df = pd.read_csv(bc_path, sep="\t", header=None)
     barcodes = barcodes_df.iloc[:, 0].astype(str).values
@@ -300,9 +313,6 @@ def _read_10x_dir_as_dataframe(exp_dir, exclude_mt=False):
     kept_genes = gene_symbols[keep_idx]
 
     df_exp = pd.DataFrame(mat_sub, index=barcodes, columns=kept_genes)
-    # Deduplicate gene symbols by keeping the highest-variance isoform/entry
-    if df_exp.columns.duplicated().any():
-        df_exp = df_exp.loc[:, ~df_exp.columns.duplicated(keep="first")]
 
     return df_exp
 
