@@ -98,7 +98,7 @@ morphotranscriptomics/
 ├── leave_one_animal_out_cv.py               # Step CV (cv/loaocv)    : Leave-One-Animal-Out Cross-Validation (LOAOCV)
 ├── cell_cycle.py                            # Shared cited cell-cycle & custom gene exclusion utilities
 ├── hvg_utils.py                             # Shared gene prevalence (--min_cells_per_gene) & HVG selection utilities
-├── preprocessing.py                         # Unified Depth Norm (--depth_norm) -> Cell-Cycle Regression (--regress_cell_cycle)
+├── preprocessing.py                         # Unified Depth Norm (--depth_norm) -> CDR (--adjust_library_depth) -> CC Regression (--regress_cell_cycle)
 └── run_master_analysis.py                   # Master CLI Pipeline Runner
 ```
 
@@ -134,7 +134,7 @@ morphotranscriptomics/
 ### Step 2: Marker Gene Expression Rankings & Cell Mapping
 **Script**: `02_gene_expression_rankings.py` (`--step 2` or `--step rankings`)
 
-- **What it does for the biologist**: Filters out non-informative ribosomal genes (`Rps`, `Rpl`) and unannotated genes (`Unnamed`). Finds the top-N highest and lowest expressing single cells for key megakaryocyte marker genes (e.g. `kalrn`, `pf4`, `itga2b`) using fast vectorized lookups. Automatically maps each cell to its mouse ID, plate, well, `.fcs` file, and `.cvw` file.
+- **What it does for the biologist**: Filters out non-informative ribosomal genes (`Rps`, `Rpl`) and unannotated genes (`Unnamed`), while retaining mitochondrial (`mt-`/`MT-`) genes by default (pass `--exclude_mt` to filter them out). Finds the top-N highest and lowest expressing single cells for key megakaryocyte marker genes (e.g. `kalrn`, `pf4`, `itga2b`) using fast vectorized lookups. Automatically maps each cell to its mouse ID, plate, well, `.fcs` file, and `.cvw` file.
 - **Outputs**:
   - `output/kalrn_top_bottom_cells.csv`: Table containing cell barcodes, expression values, mouse ID, plate, well, and flow file paths.
   - `output/02_gene_rankings_kalrn.png`: Ranking bar plot.
@@ -144,8 +144,8 @@ morphotranscriptomics/
 ### Step 3: Dimensionality Reduction (PCA & UMAP)
 **Script**: `03_dimensionality_reduction.py` (`--step 3` or `--step umap`)
 
-- **What it does for the biologist**: Selects Highly Variable Genes (HVGs, default top 2,000; refinable via `--n_hvg`, `--hvg_method`, and `--min_cells_per_gene`), scales expression data, performs Principal Component Analysis (PCA), and projects cells onto a 2D UMAP manifold.
-- **Optional Gene Filtering (No Phase Inference)**: Supports `--exclude_cell_cycle` (drops the cited 97-gene Tirosh et al. 2016 / Seurat `cc.genes.updated.2019` set + legacy aliases), `--exclude_genes_file` (drops any user-supplied `.txt`/`.csv`/`.tsv` list, e.g. Mouse `GO:0007049`), and `--exclude_genes` (comma-separated symbols). Every excluded gene and its citation is recorded in `output/03_excluded_genes_audit.csv`. Discrete G1/S/G2M phase classification and regression are intentionally omitted because megakaryocytes undergo endomitosis rather than canonical diploid mitosis (Luecken & Theis, 2019).
+- **What it does for the biologist**: Operates on the full unified **393 QC-passed cell cohort (`M1`–`M7`)**, selects Highly Variable Genes (HVGs, default top 2,000; refinable via `--n_hvg`, `--hvg_method`, and `--min_cells_per_gene`), optionally applies library-depth / Cellular Detection Rate (CDR) residualization (`--adjust_library_depth`), scales expression data, performs Principal Component Analysis (PCA), and projects cells onto a 2D UMAP manifold.
+- **Optional Gene Filtering**: Supports `--exclude_mt` (opt-in mitochondrial `mt-`/`MT-` gene filtering; **off by default**), `--exclude_cell_cycle` (drops the cited 97-gene Tirosh et al. 2016 / Seurat `cc.genes.updated.2019` set + legacy aliases), `--exclude_genes_file` (drops any user-supplied `.txt`/`.csv`/`.tsv` list, e.g. Mouse `GO:0007049`), and `--exclude_genes` (comma-separated symbols). Every excluded cell-cycle/custom gene and its citation is recorded in `output/03_excluded_genes_audit.csv`.
 - **Outputs**:
   - `output/03_umap_supervised_ploidy.png`: UMAP plot where cells are colored by genome ploidy ($2\text{n}, 4\text{n}, 8\text{n}, 16\text{n}, 32\text{n}$).
   - `output/03_umap_dataset_cohort.png`: UMAP plot comparing Train vs. Pilot cohorts.
@@ -210,12 +210,15 @@ morphotranscriptomics/
 
 All RNA-consuming pipeline stages (**Steps 2, 3, 4, 5, and 5b**) share a unified preprocessing pipeline (`preprocessing.py`) executed in the canonical order:
 1. **Depth Normalization (`--depth_norm`)**: Defaults to `cp10k_log1p` (library-size normalization to 10,000 counts per cell + $\log(1+x)$). Pass `--depth_norm none` to reproduce legacy raw-count baselines.
-2. **Cell-Cycle Scoring & Linear Regression (`--regress_cell_cycle`)**: Computed *after* depth normalization (and *before* optional gene exclusion) using the cited Tirosh et al. (2016) / Seurat `cc.genes.updated.2019` S and G2/M gene lists:
+2. **Optional Library-Depth / Cellular Detection Rate (CDR) Residualization (`--adjust_library_depth`)**: Regresses out per-cell mean standardized expression / gene-detection rate (Finak et al., 2015) and re-standardizes within each cohort. Always applied by default in Step 4 (unless `--raw_ranks` is passed) and opt-in for Steps 3, 5, and 5b via `--adjust_library_depth`.
+3. **Cell-Cycle Scoring & Linear Regression (`--regress_cell_cycle`)**: Computed *after* depth normalization (and *before* optional gene exclusion) using the cited Tirosh et al. (2016) / Seurat `cc.genes.updated.2019` S and G2/M gene lists:
    - `none` *(default)*: No cell-cycle regression applied.
    - `full`: Regresses out both `S_score` and `G2M_score` via OLS (`*_cell_cycle_scores.csv` audit log saved).
    - `difference`: Regresses out `CC_difference = S_score - G2M_score` via OLS (removes S vs. G2/M phase variation while preserving cycling vs. non-cycling / endomitotic state separation).
-   - *Step 5 (MOFA2)*: Because MOFA2's Poisson/Bernoulli likelihoods require non-negative integer / binary counts, requesting `--regress_cell_cycle` automatically switches MOFA2's RNA likelihood to `gaussian` with a clear log warning.
-3. **Optional Gene Exclusion (`--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`, `--exclude_steps`)**: Independent of regression; removes the cited 97 cell-cycle genes (+ 6 legacy aliases) or custom gene lists via `cell_cycle.py`, logging every excluded gene to `*_excluded_genes_audit.csv`.
+   - *Step 5 (MOFA2)*: Because MOFA2's Poisson/Bernoulli likelihoods require non-negative integer / binary counts, requesting `--adjust_library_depth` or `--regress_cell_cycle` automatically switches MOFA2's RNA likelihood to `gaussian` with a clear log warning.
+4. **Optional Gene Exclusion (`--exclude_mt`, `--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`, `--exclude_steps`)**: Independent of regression:
+   - `--exclude_mt` *(default: off)*: Retains mitochondrial (`mt-`/`MT-`) genes by default across Steps 2–5b; pass `--exclude_mt` to exclude them for sensitivity comparisons.
+   - `--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`: Removes the cited 97 cell-cycle genes (+ 6 legacy aliases) or custom gene lists via `cell_cycle.py`, logging every excluded gene to `*_excluded_genes_audit.csv`.
 
 ### Cited Seurat Cell-Cycle Gene Lists
 - **Tirosh et al. (2016) / Seurat `cc.genes`**: Canonical human cell-cycle gene signature comprising **43 S-phase** and **54 G2/M-phase** markers (97 genes total) derived from single-cell RNA-seq of proliferating cells (Tirosh et al., 2016, *Science* 352(6282):189–196, DOI: [10.1126/science.aad0501](https://doi.org/10.1126/science.aad0501)).
@@ -261,9 +264,12 @@ python run_master_analysis.py --step correlations --depth_norm cp10k_log1p --reg
 #   --hvg_method: default | raw_var | log1p_var | seurat | seurat_v3
 python run_master_analysis.py --min_mapped_reads 50000 --min_map_pc 60.0 --min_cells_per_gene 5 --n_hvg 3000 --hvg_method seurat --out_dir "output_refined"
 
-# Generate ALL pipeline figures (including MOFA K=5,10,15 sweep, LOAOCV, and MVAE) into gitignored figures/:
-python run_master_analysis.py --out_dir "figures" --gene kalrn --mofa_factors "5,10,15" --loaocv
-python run_master_analysis.py --step mvae --out_dir "figures"
+# Generate ALL pipeline figures under recommended depth + CDR controls (mitochondrial genes retained by default):
+python run_master_analysis.py --out_dir "figures" --gene kalrn --depth_norm cp10k_log1p --adjust_library_depth --regress_cell_cycle none --mofa_factors "5,10,15" --loaocv
+python run_master_analysis.py --step mvae --out_dir "figures" --depth_norm cp10k_log1p --adjust_library_depth --regress_cell_cycle none
+
+# Optional: exclude mitochondrial (mt-/MT-) genes across Steps 2-5b (off by default):
+python run_master_analysis.py --exclude_mt --out_dir "output_no_mt"
 
 # Run individual steps by number or descriptive alias:
 #   1/qc, 2/rankings, 3/umap, 4/correlations, 5/mofa, 5b/mvae, 6/enrichment, cv/loaocv

@@ -79,6 +79,7 @@ def load_10x_expression_data(exp_dir):
 def filter_genes(
     features_df,
     matrix,
+    exclude_mt=False,
     exclude_cell_cycle=False,
     exclude_genes_file=None,
     exclude_genes=None,
@@ -88,16 +89,17 @@ def filter_genes(
     Applies morphotrans2 gene filtering logic:
     - Excludes ribosomal genes starting with ('Rps', 'Rpl')
     - Excludes genes starting with 'Unnamed'
+    - Optionally excludes mitochondrial genes ('mt-', 'MT-') when exclude_mt=True (off by default)
     - Optionally excludes cited cell-cycle genes and/or user-supplied genes
     """
     symbols = features_df["gene_symbol"].astype(str)
     
-    is_mt = symbols.str.startswith("mt-")
+    is_mt = symbols.str.startswith(("mt-", "MT-"))
     is_ribo = symbols.str.startswith(("Rps", "Rpl"))
     is_unnamed = symbols.str.startswith("Unnamed")
 
-    # morphotrans2 notebook rule: genes_to_keep = ~(is_ribo | is_unnamed)
-    genes_to_keep = ~(is_ribo | is_unnamed)
+    # morphotrans2 notebook rule: genes_to_keep = ~(is_ribo | is_unnamed); mt excluded only if requested
+    genes_to_keep = ~(is_ribo | is_unnamed | (is_mt if exclude_mt else False))
 
     if exclude_cell_cycle or exclude_genes_file or exclude_genes:
         from cell_cycle import filter_excluded_genes
@@ -332,6 +334,11 @@ def main():
         help="Cell-cycle regression after depth normalization: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M)"
     )
     parser.add_argument(
+        "--exclude_mt",
+        action="store_true",
+        help="Exclude mitochondrial genes (starting with 'mt-' or 'MT-'); off by default"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes from ranking pool"
@@ -369,6 +376,7 @@ def main():
     matrix, features_df, _ = filter_genes(
         features_df,
         matrix,
+        exclude_mt=args.exclude_mt,
         exclude_cell_cycle=False,
         exclude_genes_file=None,
         exclude_genes=None,

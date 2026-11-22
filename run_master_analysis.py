@@ -223,6 +223,11 @@ def main():
         help="Cell-cycle regression applied AFTER depth normalization across Steps 2, 3, 4, 5, 5b: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M)"
     )
     parser.add_argument(
+        "--exclude_mt",
+        action="store_true",
+        help="Exclude mitochondrial genes (mt-/MT-) in Steps 2, 3, 4, 5, 5b (default: False, retains mitochondrial genes)"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes (97 genes + legacy aliases)"
@@ -297,6 +302,7 @@ def main():
     print(f" Depth Norm        : {args.depth_norm}")
     print(f" Adjust Depth (CDR): {args.adjust_library_depth} (Step 4 correlations: always on unless --raw_ranks)")
     print(f" Regress Cell Cycle: {args.regress_cell_cycle}")
+    print(f" Exclude Mito (mt-): {args.exclude_mt}")
     if any_exclusion:
         print(f" Exclude Cell Cycle: {args.exclude_cell_cycle}")
         if args.exclude_genes_file:
@@ -342,6 +348,8 @@ def main():
             "--depth_norm", args.depth_norm,
             "--regress_cell_cycle", args.regress_cell_cycle,
         ], "2")
+        if args.exclude_mt:
+            cmd.append("--exclude_mt")
         run_command(cmd)
 
     # Step 3 (umap): Dimensionality Reduction (PCA & UMAP)
@@ -359,6 +367,8 @@ def main():
         ], "3")
         if args.adjust_library_depth:
             cmd.append("--adjust_library_depth")
+        if args.exclude_mt:
+            cmd.append("--exclude_mt")
         run_command(cmd)
 
     # Step 4 (correlations): Morphology-to-Gene Spearman Rank Correlations
@@ -379,6 +389,8 @@ def main():
             "--hvg_method", args.hvg_method,
             "--min_cells_per_gene", str(args.min_cells_per_gene),
         ], "4")
+        if args.exclude_mt:
+            cmd.append("--exclude_mt")
         run_command(cmd)
 
     # Step 5 (mofa): Multi-Omics Factor Analysis (MOFA) Integration
@@ -399,6 +411,8 @@ def main():
         ], "5")
         if args.adjust_library_depth:
             cmd.append("--adjust_library_depth")
+        if args.exclude_mt:
+            cmd.append("--exclude_mt")
         run_command(cmd)
 
     # Step 5b (mvae): PyTorch Multimodal VAE (run when explicitly selected via --step 5b or --step mvae)
@@ -416,6 +430,8 @@ def main():
         ], "5b")
         if args.adjust_library_depth:
             cmd.append("--adjust_library_depth")
+        if args.exclude_mt:
+            cmd.append("--exclude_mt")
         run_command(cmd)
 
     # Step 6 (enrichment): Biological Pathway Enrichment & WordCloud

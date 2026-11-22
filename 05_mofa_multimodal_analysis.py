@@ -178,6 +178,7 @@ def prepare_mofa_input_matrices(
     depth_norm="cp10k_log1p",
     regress_cell_cycle="none",
     adjust_library_depth=False,
+    exclude_mt=False,
     exclude_cell_cycle=False,
     exclude_genes_file=None,
     exclude_genes=None,
@@ -220,6 +221,7 @@ def prepare_mofa_input_matrices(
         min_cells_per_gene=min_cells_per_gene,
         depth_norm=depth_norm,
         regress_cell_cycle=regress_cell_cycle,
+        exclude_mt=exclude_mt,
         out_dir=out_dir,
         step_prefix="05_mofa",
     )
@@ -852,6 +854,11 @@ def main():
         help="Reuse existing HDF5 model file if present instead of retraining"
     )
     parser.add_argument(
+        "--exclude_mt",
+        action="store_true",
+        help="Exclude mitochondrial genes (starting with 'mt-' or 'MT-'); off by default"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before MOFA2 HVG selection"
@@ -894,6 +901,7 @@ def main():
         depth_norm=args.depth_norm,
         regress_cell_cycle=args.regress_cell_cycle,
         adjust_library_depth=args.adjust_library_depth,
+        exclude_mt=args.exclude_mt,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,
         exclude_genes=args.exclude_genes,

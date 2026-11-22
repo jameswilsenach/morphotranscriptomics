@@ -46,6 +46,7 @@ def load_and_preprocess_anndata(
     depth_norm="cp10k_log1p",
     adjust_library_depth=False,
     regress_cell_cycle="none",
+    exclude_mt=False,
     exclude_cell_cycle=False,
     exclude_genes_file=None,
     exclude_genes=None,
@@ -79,6 +80,7 @@ def load_and_preprocess_anndata(
             min_cells_per_gene=min_cells_per_gene,
             depth_norm=depth_norm,
             regress_cell_cycle=regress_cell_cycle,
+            exclude_mt=exclude_mt,
             out_dir=out_dir,
             step_prefix="03",
         )
@@ -150,7 +152,8 @@ def load_and_preprocess_anndata(
     adata.var_names_make_unique()
     is_ribo = adata.var_names.str.startswith(('Rps', 'Rpl'))
     is_unnamed = adata.var_names.str.startswith('Unnamed')
-    adata = adata[:, ~(is_ribo | is_unnamed)].copy()
+    is_mt = adata.var_names.str.startswith(('mt-', 'MT-')) if exclude_mt else False
+    adata = adata[:, ~(is_ribo | is_unnamed | is_mt)].copy()
     if "Supervised_ploidy" not in adata.obs.columns:
         adata.obs["Supervised_ploidy"] = "Unknown"
 
@@ -383,6 +386,11 @@ def main():
         help="Minimum number of cells expressing a gene (> 0 counts) required before HVG selection (default: 0, disabled)"
     )
     parser.add_argument(
+        "--exclude_mt",
+        action="store_true",
+        help="Exclude mitochondrial genes (starting with 'mt-' or 'MT-'); off by default"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before HVG selection"
@@ -420,6 +428,7 @@ def main():
         depth_norm=args.depth_norm,
         adjust_library_depth=args.adjust_library_depth,
         regress_cell_cycle=args.regress_cell_cycle,
+        exclude_mt=args.exclude_mt,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,
         exclude_genes=args.exclude_genes,

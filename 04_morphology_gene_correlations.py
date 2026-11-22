@@ -256,7 +256,7 @@ def load_qc_metadata_backwards_compatible(
     return qc_df
 
 
-def _read_10x_dir_as_dataframe(exp_dir):
+def _read_10x_dir_as_dataframe(exp_dir, exclude_mt=False):
     """
     Reads a 10x Genomics matrix directory (matrix.mtx[.gz], features.tsv[.gz], barcodes.tsv[.gz])
     using scipy.io.mmread and pandas without requiring scanpy BLAS calls.
@@ -290,11 +290,10 @@ def _read_10x_dir_as_dataframe(exp_dir):
 
     mat = mmread(mtx_path).tocsc()  # shape: (n_genes, n_cells)
 
-    # Filter out ribosomal (Rps, Rpl), mitochondrial (mt-), and Unnamed genes
+    # Filter out ribosomal (Rps, Rpl) and Unnamed genes; mitochondrial (mt-, MT-) filtered only if exclude_mt=True
     s_series = pd.Series(gene_symbols)
-    keep_mask = ~(
-        s_series.str.startswith(("Rps", "Rpl", "mt-", "MT-", "Unnamed"))
-    ).values
+    prefixes = ("Rps", "Rpl", "Unnamed", "mt-", "MT-") if exclude_mt else ("Rps", "Rpl", "Unnamed")
+    keep_mask = ~(s_series.str.startswith(prefixes)).values
     keep_idx = np.where(keep_mask)[0]
 
     mat_sub = mat[keep_idx, :].T.toarray().astype(np.float64)  # shape: (n_cells, n_kept_genes)
@@ -360,6 +359,7 @@ def load_expression_backwards_compatible(
     min_cells_per_gene=0,
     depth_norm="cp10k_log1p",
     regress_cell_cycle="none",
+    exclude_mt=False,
     out_dir=None,
     step_prefix="04",
 ):
@@ -399,7 +399,7 @@ def load_expression_backwards_compatible(
             continue
         seen_abs_dirs.add(abs_d)
 
-        df_raw = _read_10x_dir_as_dataframe(abs_d)
+        df_raw = _read_10x_dir_as_dataframe(abs_d, exclude_mt=exclude_mt)
         df_matched = _match_barcodes_to_metadata(df_raw, qc_df)
         new_cells = [c for c in df_matched.index if c not in matched_cell_ids]
         if len(new_cells) > 0:
@@ -433,6 +433,9 @@ def load_expression_backwards_compatible(
 
                         df_h5 = pd.DataFrame(rna_mat, index=samples, columns=genes)
                         df_h5 = df_h5.loc[:, ~df_h5.columns.duplicated(keep="first")]
+                        if exclude_mt:
+                            mt_mask = pd.Series(df_h5.columns, dtype=str).str.startswith(("mt-", "MT-")).values
+                            df_h5 = df_h5.loc[:, ~mt_mask]
                         df_h5_matched = _match_barcodes_to_metadata(df_h5, qc_df.loc[unmatched_cells])
                         if not df_h5_matched.empty:
                             cohort_frames.append(("mofa_hdf5", os.path.abspath(h5_p), df_h5_matched))
@@ -1299,6 +1302,11 @@ def main():
         help="Cell-cycle regression after depth normalization: 'none' (default), 'full' (S + G2M), or 'difference' (S - G2M)"
     )
     parser.add_argument(
+        "--exclude_mt",
+        action="store_true",
+        help="Exclude mitochondrial genes (starting with 'mt-' or 'MT-'); off by default"
+    )
+    parser.add_argument(
         "--exclude_cell_cycle",
         action="store_true",
         help="Exclude cited Tirosh et al. (2016) / Seurat cc.genes.updated.2019 cell cycle genes before correlation analysis"
@@ -1344,6 +1352,7 @@ def main():
         min_cells_per_gene=args.min_cells_per_gene,
         depth_norm=args.depth_norm,
         regress_cell_cycle=args.regress_cell_cycle,
+        exclude_mt=args.exclude_mt,
         out_dir=args.out_dir,
         step_prefix="04",
     )
