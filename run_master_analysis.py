@@ -12,6 +12,7 @@ Runs the complete pipeline end-to-end or individual analysis stages cleanly via 
   Step 5b (mvae)         : 05b_mvae_multimodal_analysis.py     (PyTorch Multimodal VAE integration, optional/standalone)
   Step 6  (enrichment)   : 06_pathway_enrichment.py            (Pathway enrichment dotplots & WordCloud visualization)
   Step CV (cv/loaocv)    : leave_one_animal_out_cv.py          (Leave-One-Animal-Out Cross-Validation across all mice)
+  Step Supp (contam)     : supp_contamination_morphology_ridge.py (Supplementary: Nested LOAOCV logistic ridge predicting contamination from morphology)
 
 Usage Examples:
     # Run Step 1 (Quality Control):
@@ -61,6 +62,9 @@ STEP_ALIASES = {
     "pathways": "6",
     "cv": "cv",
     "loaocv": "cv",
+    "contamination": "supp_contam",
+    "contam": "supp_contam",
+    "supp_contam": "supp_contam",
 }
 
 STEP_LABELS = {
@@ -72,6 +76,7 @@ STEP_LABELS = {
     "5b": "Step 5b (mvae)",
     "6": "Step 6 (enrichment)",
     "cv": "Step CV (loaocv)",
+    "supp_contam": "Step Supp (contamination)",
 }
 
 # Steps that require output/qc_filtered_metadata.csv produced by Step 1 (qc)
@@ -147,7 +152,7 @@ def main():
             "Specific step to run by number or alias: "
             "'all', '1'/'qc', '2'/'rankings', '3'/'umap'/'dimred', "
             "'4'/'correlations'/'corr', '5'/'mofa', '5b'/'mvae', "
-            "'6'/'enrichment'/'pathways', 'cv'/'loaocv'"
+            "'6'/'enrichment'/'pathways', 'cv'/'loaocv', 'contamination'/'contam'/'supp_contam'"
         )
     )
     parser.add_argument("--loaocv", action="store_true", help="Enable Leave-One-Animal-Out Cross-Validation stage")
@@ -438,6 +443,16 @@ def main():
             "--out_dir", args.out_dir,
             "--min_mapped_reads", str(args.min_mapped_reads),
             "--min_map_pc", str(args.min_map_pc),
+        ]
+        run_command(cmd)
+
+    # Step Supp (contamination): Supplementary Logistic Ridge Regression (Morphology -> Contamination)
+    if canonical_step in ["all", "supp_contam"]:
+        print("\n>>> STEP SUPP (contamination): Nested LOAOCV Logistic Ridge Regression (Morphology -> Contamination)")
+        cmd = [
+            python_exe, "supp_contamination_morphology_ridge.py",
+            "--metadata_file", args.metadata_file,
+            "--out_dir", args.out_dir,
         ]
         run_command(cmd)
 
