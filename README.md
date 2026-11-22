@@ -96,6 +96,7 @@ morphotranscriptomics/
 ├── 05b_mvae_multimodal_analysis.py          # Step 5b (mvae)         : PyTorch Multimodal VAE (MVAE)
 ├── 06_pathway_enrichment.py                 # Step 6  (enrichment)   : Pathway enrichment (gseapy) & WordCloud
 ├── leave_one_animal_out_cv.py               # Step CV (cv/loaocv)    : Leave-One-Animal-Out Cross-Validation (LOAOCV)
+├── supp_contamination_morphology_ridge.py   # Step Supp (contam)     : Nested LOAOCV logistic ridge predicting contamination from morphology
 ├── cell_cycle.py                            # Shared cited cell-cycle & custom gene exclusion utilities
 ├── hvg_utils.py                             # Shared gene prevalence (--min_cells_per_gene) & HVG selection utilities
 ├── preprocessing.py                         # Unified Depth Norm (--depth_norm) -> CDR (--adjust_library_depth) -> CC Regression (--regress_cell_cycle)
@@ -128,6 +129,18 @@ morphotranscriptomics/
   - `output/loaocv_confusion_matrix.png`: Normalized pooled out-of-fold confusion matrix.
   - `output/loaocv_continuous_ploidy_scatter.png`: Predicted vs True log2 ploidy correlation plot.
   - `output/loaocv_pca_projection.png`: PCA 2D projections of reference vs holdout cells colored by ploidy.
+
+---
+
+### Supplementary Analysis: Contamination Prediction from Morphology
+**Script**: `supp_contamination_morphology_ridge.py` (`--step contamination`, `--step contam`, or `--step supp_contam`)
+
+- **What it does for the biologist**: Evaluates whether wells flagged as `Contaminated == True` in `Metadata_merged_YL_SF_20.10.26_v2.csv` can be inferred purely from imaging flow cytometry morphology (97 numeric optical/morphological features across all **1,204** non-control single cells with valid morphology measurements across Mice `M1`–`M7`: 446 contaminated [37.0%], 758 clean [63.0%]). Uses **Nested Leave-One-Animal-Out Cross-Validation (LOAOCV)** with L2-regularized Logistic Regression (Logistic Ridge Regression, `class_weight="balanced"`): the outer loop holds out each mouse $M_k$ in turn, while the inner LOAOCV loop across the remaining 6 mice tunes the inverse L2 regularization strength $C \in [10^{-4}, 10^{3}]$ (with `StandardScaler` fit strictly inside each training split to prevent data leakage). Pooled out-of-fold ROC-AUC significance is evaluated via within-mouse label permutation testing ($n = 1,000$).
+- **Outputs**:
+  - `output/supp_contamination_morphology_ridge.png`: 4-panel publication-grade supplementary figure showing (A) per-animal & pooled out-of-fold ROC curves, (B) per-animal ROC-AUC / PR-AUC / Balanced Accuracy generalization across `M1`–`M7`, (C) inner-LOAOCV L2 regularization ($C$) tuning profile, and (D) top 15 standardized morphology predictors (± SD across folds).
+  - `output/supp_contamination_ridge_fold_metrics.csv`: Per-animal outer LOAOCV metrics, selected $C$, inner-CV AUC, and pooled summary.
+  - `output/supp_contamination_ridge_cell_predictions.csv`: Cell-level out-of-fold predicted contamination probabilities.
+  - `output/supp_contamination_ridge_coefficients.csv`: Mean ± SD standardized logistic ridge coefficients across all 97 morphology features.
 
 ---
 
@@ -272,7 +285,7 @@ python run_master_analysis.py --step mvae --out_dir "figures" --depth_norm cp10k
 python run_master_analysis.py --exclude_mt --out_dir "output_no_mt"
 
 # Run individual steps by number or descriptive alias:
-#   1/qc, 2/rankings, 3/umap, 4/correlations, 5/mofa, 5b/mvae, 6/enrichment, cv/loaocv
+#   1/qc, 2/rankings, 3/umap, 4/correlations, 5/mofa, 5b/mvae, 6/enrichment, cv/loaocv, contamination/contam/supp_contam
 python run_master_analysis.py --step qc
 python run_master_analysis.py --step correlations --exclude_cell_cycle --out_dir "output_no_cc"
 python run_master_analysis.py --step mofa
@@ -280,6 +293,7 @@ python run_master_analysis.py --step mofa
 python run_master_analysis.py --step mofa --mofa_factors "5,10,15" --out_dir "figures"
 python run_master_analysis.py --step mvae
 python run_master_analysis.py --step cv
+python run_master_analysis.py --step contamination --out_dir "figures"
 
 # Exclude cited cell cycle genes (Tirosh et al. 2016 / Seurat cc.genes.updated.2019) across ALL analyses:
 python run_master_analysis.py --exclude_cell_cycle --out_dir "output_no_cc"
@@ -332,6 +346,10 @@ All publication figures and tabular summaries can be regenerated into the gitign
 | `loaocv_confusion_matrix.png` | Normalized pooled out-of-fold ploidy confusion matrix across all 7 holdout animals | Step CV (`cv`) |
 | `loaocv_continuous_ploidy_scatter.png` | Out-of-fold continuous $\log_2(\text{ploidy})$ Ridge regression predictions vs. true ploidy colored by animal | Step CV (`cv`) |
 | `loaocv_pca_projection.png` | Morphology PCA manifold colored by ploidy (left) and biological replicate animal `M1`–`M7` (right) | Step CV (`cv`) |
+| `supp_contamination_morphology_ridge.png` | 4-panel supplementary figure: Nested LOAOCV logistic ridge regression predicting `Contaminated` status from 97 imaging morphology features across `M1`–`M7` | Step Supp (`contamination`) |
+| `supp_contamination_ridge_fold_metrics.csv` | Per-animal & pooled out-of-fold ROC-AUC, PR-AUC, Balanced Accuracy, F1, and inner-LOAOCV selected $C$ | Step Supp (`contamination`) |
+| `supp_contamination_ridge_cell_predictions.csv` | Cell-level out-of-fold predicted contamination probabilities across all 1,204 single cells | Step Supp (`contamination`) |
+| `supp_contamination_ridge_coefficients.csv` | Mean ± SD standardized logistic ridge coefficients across all 97 morphology features | Step Supp (`contamination`) |
 | `*_excluded_genes_audit.csv` | Audit log of excluded cell-cycle / custom genes & citations (when gene exclusion is enabled) | Steps 2–5b |
 
 ---
