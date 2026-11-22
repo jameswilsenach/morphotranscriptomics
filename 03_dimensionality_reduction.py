@@ -108,6 +108,7 @@ def load_and_preprocess_anndata(
     adata.layers["raw_counts"] = df_raw[df_proc.columns].values.astype(np.float32)
     adata.X = df_proc.values.astype(np.float32)
     adata.uns["depth_norm"] = depth_norm
+    adata.uns["adjust_library_depth"] = bool(adjust_library_depth)
     adata.uns["regress_cell_cycle"] = regress_cell_cycle
 
     return adata
@@ -127,13 +128,24 @@ def compute_hvg_pca_umap(adata, n_top_genes=2000, hvg_method="default", min_cell
         else None
     )
     already_log = adata.uns.get("depth_norm", "none") == "cp10k_log1p"
+    is_cdr_zscored = bool(adata.uns.get("adjust_library_depth", False))
     method = resolve_hvg_method(hvg_method, default_method="log1p_var" if already_log else "raw_var")
+
+    # When CDR z-scoring was applied, every non-constant gene has unit variance (1.0),
+    # so rank HVGs on pre-CDR counts (via log1p_var / seurat / seurat_v3) before subsetting df_expr.
+    if is_cdr_zscored and df_raw_for_filter is not None:
+        hvg_input = df_raw_for_filter
+        hvg_already_log = False
+    else:
+        hvg_input = df_expr
+        hvg_already_log = already_log
+
     top_hvg = select_hvgs(
-        df_expr,
+        hvg_input,
         n_hvg=n_top_genes,
         hvg_method=method,
         min_cells_per_gene=min_cells_per_gene,
-        already_log_normalized=already_log,
+        already_log_normalized=hvg_already_log,
         raw_counts_for_filter=df_raw_for_filter,
     )
     df_hvg = df_expr[top_hvg]
@@ -158,6 +170,9 @@ def compute_hvg_pca_umap(adata, n_top_genes=2000, hvg_method="default", min_cell
 
     adata.obsm["X_pca"] = pca_embedding
     adata.obsm["X_umap"] = umap_embedding
+    adata.uns["pca_variance_ratio"] = pca.explained_variance_ratio_.tolist()
+    adata.obs["PC1"] = pca_embedding[:, 0]
+    adata.obs["PC2"] = pca_embedding[:, 1]
     adata.obs["UMAP1"] = umap_embedding[:, 0]
     adata.obs["UMAP2"] = umap_embedding[:, 1]
 
@@ -165,9 +180,33 @@ def compute_hvg_pca_umap(adata, n_top_genes=2000, hvg_method="default", min_cell
 
 
 def plot_umap_projections(adata, out_dir, marker_genes=["kalrn", "pf4"]):
-    """Generates publication-quality UMAP plots."""
+    """Generates publication-quality PCA and UMAP plots."""
     os.makedirs(out_dir, exist_ok=True)
     setup_plot_style()
+
+    # Plot 0: PCA (PC1 vs PC2) by Supervised Ploidy
+    if "PC1" in adata.obs.columns and "PC2" in adata.obs.columns:
+        var_rat = adata.uns.get("pca_variance_ratio", [])
+        pc1_lbl = f"PC1 ({var_rat[0] * 100:.1f}% var)" if len(var_rat) > 0 else "PC1"
+        pc2_lbl = f"PC2 ({var_rat[1] * 100:.1f}% var)" if len(var_rat) > 1 else "PC2"
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.scatterplot(
+            data=adata.obs,
+            x="PC1",
+            y="PC2",
+            hue="Supervised_ploidy",
+            palette="tab10",
+            s=60,
+            alpha=0.9,
+            ax=ax
+        )
+        ax.set_title("PCA Projection (PC1 vs PC2): Supervised Ploidy", fontsize=13, fontweight="bold")
+        ax.set_xlabel(pc1_lbl)
+        ax.set_ylabel(pc2_lbl)
+        plt.tight_layout()
+        pca_path = os.path.join(out_dir, "03_pca_supervised_ploidy.png")
+        plt.savefig(pca_path)
+        plt.close()
 
     # Plot 1: UMAP by Supervised Ploidy
     fig, ax = plt.subplots(figsize=(8, 6))
