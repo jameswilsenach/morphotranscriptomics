@@ -211,6 +211,11 @@ def main():
         help="Library-size depth normalization applied across Steps 2, 3, 4, 5, 5b before cell-cycle regression (default: cp10k_log1p)"
     )
     parser.add_argument(
+        "--adjust_library_depth",
+        action="store_true",
+        help="Apply library-depth / Cellular Detection Rate (CDR) residualization in Steps 3, 5, and 5b (Step 4 applies CDR by default; Finak et al., 2015)"
+    )
+    parser.add_argument(
         "--regress_cell_cycle",
         type=str,
         default="none",
@@ -290,6 +295,7 @@ def main():
     print(f" Min Cells / Gene  : {args.min_cells_per_gene}")
     print(f" HVG Selection     : n_hvg={args.n_hvg}, method='{args.hvg_method}'")
     print(f" Depth Norm        : {args.depth_norm}")
+    print(f" Adjust Depth (CDR): {args.adjust_library_depth} (Step 4 correlations: always on unless --raw_ranks)")
     print(f" Regress Cell Cycle: {args.regress_cell_cycle}")
     if any_exclusion:
         print(f" Exclude Cell Cycle: {args.exclude_cell_cycle}")
@@ -351,6 +357,8 @@ def main():
             "--hvg_method", args.hvg_method,
             "--min_cells_per_gene", str(args.min_cells_per_gene),
         ], "3")
+        if args.adjust_library_depth:
+            cmd.append("--adjust_library_depth")
         run_command(cmd)
 
     # Step 4 (correlations): Morphology-to-Gene Spearman Rank Correlations
@@ -389,6 +397,8 @@ def main():
             "--hvg_method", args.hvg_method,
             "--min_cells_per_gene", str(args.min_cells_per_gene),
         ], "5")
+        if args.adjust_library_depth:
+            cmd.append("--adjust_library_depth")
         run_command(cmd)
 
     # Step 5b (mvae): PyTorch Multimodal VAE (run when explicitly selected via --step 5b or --step mvae)
@@ -404,6 +414,8 @@ def main():
             "--hvg_method", args.hvg_method,
             "--min_cells_per_gene", str(args.min_cells_per_gene),
         ], "5b")
+        if args.adjust_library_depth:
+            cmd.append("--adjust_library_depth")
         run_command(cmd)
 
     # Step 6 (enrichment): Biological Pathway Enrichment & WordCloud

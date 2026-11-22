@@ -245,9 +245,46 @@ def score_and_regress_cell_cycle(
     return df_reg, scores_df
 
 
+def adjust_library_depth_cdr(df_expr: pd.DataFrame) -> pd.DataFrame:
+    """
+    Applies per-cell library-depth / Cellular Detection Rate (CDR) residualization
+    (Finak et al., 2015): z-scores each gene, computes each cell's global mean
+    standardized expression (CDR proxy), linearly regresses it out of every gene,
+    and re-standardizes each non-constant gene to zero mean and unit variance.
+    """
+    X = df_expr.values.astype(np.float64)
+    col_mean = np.mean(X, axis=0, keepdims=True)
+    col_std = np.std(X, axis=0, keepdims=True)
+    non_const = col_std[0] > 0
+    if not np.any(non_const):
+        return df_expr.copy()
+
+    Z = np.zeros_like(X, dtype=np.float64)
+    Z[:, non_const] = (X[:, non_const] - col_mean[:, non_const]) / col_std[:, non_const]
+
+    depth_factor = np.mean(Z[:, non_const], axis=1)
+    d_c = depth_factor - np.mean(depth_factor)
+    d_var = float(np.sum(d_c * d_c))
+    if d_var <= 0.0:
+        return pd.DataFrame(Z, index=df_expr.index, columns=df_expr.columns)
+
+    beta = np.sum(d_c[:, np.newaxis] * Z[:, non_const], axis=0, keepdims=True) / d_var
+    res = Z[:, non_const] - d_c[:, np.newaxis] * beta
+    r_std = np.std(res, axis=0, keepdims=True)
+    r_std[r_std == 0] = 1.0
+    Z[:, non_const] = (res - np.mean(res, axis=0, keepdims=True)) / r_std
+
+    print(
+        f"[Depth CDR] Applied library-depth / CDR residualization (Finak et al., 2015) "
+        f"across {Z.shape[0]} cells x {int(np.sum(non_const))} non-constant genes."
+    )
+    return pd.DataFrame(Z, index=df_expr.index, columns=df_expr.columns)
+
+
 def preprocess_rna_matrix(
     df_counts: pd.DataFrame,
     depth_norm: str = "cp10k_log1p",
+    adjust_library_depth: bool = False,
     regress_cell_cycle: str = "none",
     exclude_cell_cycle: bool = False,
     exclude_genes_file: Optional[str] = None,
@@ -259,8 +296,9 @@ def preprocess_rna_matrix(
     """
     Executes the canonical RNA preprocessing order:
       1. Depth normalization (`depth_norm`: 'cp10k_log1p' or 'none')
-      2. Cell-cycle scoring & regression (`regress_cell_cycle`: 'none', 'full', 'difference')
-      3. Optional gene exclusion (`--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`)
+      2. Optional library-depth / CDR residualization (`adjust_library_depth`, Finak et al., 2015)
+      3. Cell-cycle scoring & regression (`regress_cell_cycle`: 'none', 'full', 'difference')
+      4. Optional gene exclusion (`--exclude_cell_cycle`, `--exclude_genes_file`, `--exclude_genes`)
 
     Returns (df_processed, cc_scores_df).
     """
@@ -277,7 +315,19 @@ def preprocess_rna_matrix(
             )
         df_proc = depth_normalize_expression(df_counts, method=depth_norm)
 
-    # 2. Cell-Cycle Scoring & Regression (runs BEFORE gene exclusion so S/G2M markers are present for scoring)
+    # Precompute cell-cycle scores on the depth-normalized matrix before CDR z-scoring
+    # so S/G2M module scores match across CDR-adjusted and unadjusted runs
+    precomputed_cc_scores = (
+        compute_cell_cycle_scores(df_proc)
+        if (adjust_library_depth and regress_cell_cycle != "none")
+        else None
+    )
+
+    # 2. Optional Library-Depth / CDR Residualization (strictly before cell-cycle regression)
+    if adjust_library_depth:
+        df_proc = adjust_library_depth_cdr(df_proc)
+
+    # 3. Cell-Cycle Scoring & Regression (runs BEFORE gene exclusion so S/G2M markers are present for scoring)
     cc_audit_path = None
     if out_dir and regress_cell_cycle != "none":
         prefix = f"{step_prefix}_" if step_prefix else ""
@@ -285,6 +335,7 @@ def preprocess_rna_matrix(
     df_proc, cc_scores = score_and_regress_cell_cycle(
         df_proc,
         mode=regress_cell_cycle,
+        scores_df=precomputed_cc_scores,
         audit_csv_path=cc_audit_path,
     )
 

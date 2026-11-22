@@ -248,10 +248,11 @@ conda activate sc-analysis
 # Run FULL pipeline end-to-end using default local data/ directory (CP10K+log1p depth norm by default):
 python run_master_analysis.py --out_dir "output" --gene kalrn
 
-# Run with Depth Normalization -> Cell-Cycle Regression across ALL RNA analyses (Steps 2, 3, 4, 5, 5b):
+# Run with Depth Normalization -> CDR Residualization -> Cell-Cycle Regression across RNA analyses:
 #   --depth_norm: cp10k_log1p (default) | none
+#   --adjust_library_depth: apply CDR residualization in Steps 3, 5, 5b (Step 4 applies CDR by default)
 #   --regress_cell_cycle: none (default) | full (S + G2M) | difference (S - G2M)
-python run_master_analysis.py --depth_norm cp10k_log1p --regress_cell_cycle difference --out_dir "output_cc_diff"
+python run_master_analysis.py --depth_norm cp10k_log1p --adjust_library_depth --regress_cell_cycle difference --out_dir "output_cdr_cc_diff"
 python run_master_analysis.py --step correlations --depth_norm cp10k_log1p --regress_cell_cycle full --out_dir "output_cc_full"
 
 # Refine read-count QC, gene prevalence, and HVG selection criteria end-to-end:

@@ -41,6 +41,7 @@ def load_and_preprocess_anndata(
     exp_dir,
     qc_meta_path=None,
     depth_norm="cp10k_log1p",
+    adjust_library_depth=False,
     regress_cell_cycle="none",
     exclude_cell_cycle=False,
     exclude_genes_file=None,
@@ -89,11 +90,12 @@ def load_and_preprocess_anndata(
     if "Supervised_ploidy" not in adata.obs.columns:
         adata.obs["Supervised_ploidy"] = "Unknown"
 
-    # Canonical order: Depth Normalization -> Cell-Cycle Regression -> Optional Gene Exclusion
+    # Canonical order: Depth Normalization -> Optional CDR -> Cell-Cycle Regression -> Optional Gene Exclusion
     df_raw = adata.to_df()
     df_proc, _ = preprocess_rna_matrix(
         df_raw,
         depth_norm=depth_norm,
+        adjust_library_depth=adjust_library_depth,
         regress_cell_cycle=regress_cell_cycle,
         exclude_cell_cycle=exclude_cell_cycle,
         exclude_genes_file=exclude_genes_file,
@@ -248,6 +250,11 @@ def main():
         help="Library-size depth normalization before cell-cycle regression & HVG selection (default: cp10k_log1p)"
     )
     parser.add_argument(
+        "--adjust_library_depth",
+        action="store_true",
+        help="Apply library-depth / Cellular Detection Rate (CDR) residualization after depth normalization (Finak et al., 2015)"
+    )
+    parser.add_argument(
         "--regress_cell_cycle",
         type=str,
         default="none",
@@ -306,6 +313,7 @@ def main():
         args.exp_dir,
         qc_meta_path,
         depth_norm=args.depth_norm,
+        adjust_library_depth=args.adjust_library_depth,
         regress_cell_cycle=args.regress_cell_cycle,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,

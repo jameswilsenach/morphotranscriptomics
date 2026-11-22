@@ -161,6 +161,7 @@ def load_mvae_data(
     hvg_method="default",
     min_cells_per_gene=0,
     depth_norm="cp10k_log1p",
+    adjust_library_depth=False,
     regress_cell_cycle="none",
     exclude_cell_cycle=False,
     exclude_genes_file=None,
@@ -238,14 +239,16 @@ def load_mvae_data(
 
     img_df = corr_mod.extract_morphology_features(meta_df)
 
-    # Cohort-level z-score harmonization of morphology (matching multi-cohort RNA scaling)
+    # Cohort-level z-score harmonization of morphology and optional library-depth / CDR residualization
     df_rna_h, img_df_h = corr_mod.harmonize_and_adjust_modalities(
         df_rna,
         img_df,
         cohort_sources,
-        adjust_library_depth=False,
+        adjust_library_depth=adjust_library_depth,
         regress_cell_cycle=regress_cell_cycle,
     )
+    if adjust_library_depth:
+        print("[MVAE] Applied per-cohort library-depth / CDR residualization to RNA view (Finak et al., 2015).")
 
     scaler_rna = StandardScaler()
     scaled_rna = scaler_rna.fit_transform(df_rna_h)
@@ -438,6 +441,11 @@ def main():
         help="Library-size depth normalization before cell-cycle regression & HVG selection (default: cp10k_log1p)"
     )
     parser.add_argument(
+        "--adjust_library_depth",
+        action="store_true",
+        help="Apply per-cohort library-depth / Cellular Detection Rate (CDR) residualization to RNA view (Finak et al., 2015)"
+    )
+    parser.add_argument(
         "--regress_cell_cycle",
         type=str,
         default="none",
@@ -481,6 +489,7 @@ def main():
         hvg_method=args.hvg_method,
         min_cells_per_gene=args.min_cells_per_gene,
         depth_norm=args.depth_norm,
+        adjust_library_depth=args.adjust_library_depth,
         regress_cell_cycle=args.regress_cell_cycle,
         exclude_cell_cycle=args.exclude_cell_cycle,
         exclude_genes_file=args.exclude_genes_file,
