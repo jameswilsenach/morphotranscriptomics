@@ -768,6 +768,224 @@ def evaluate_mofa_model(
     return summary, rmse_df
 
 
+def _clean_gene_for_enrichr(gene_symbol):
+    """Strips Scanpy unique suffixes (e.g., 'Ptp4a1-1' -> 'PTP4A1') and upper-cases for Enrichr."""
+    import re
+    return re.sub(r"-\d+$", "", str(gene_symbol)).upper()
+
+
+def _shorten_factor_label(label, max_len=40):
+    """Removes trailing '(GO:000xxxx)' tags and truncates long labels cleanly for plot axes."""
+    import re
+    cleaned = re.sub(r"\s*\(GO:\d+\)\s*$", "", str(label))
+    if len(cleaned) > max_len:
+        return cleaned[:max_len - 1] + "…"
+    return cleaned
+
+
+def _classify_mofa_factor(r2_rna, r2_morph):
+    """Classifies a MOFA2 factor into Morphology-Dominated, Shared Cross-Modal, mRNA-Dominated, or Minor."""
+    if r2_morph >= 5.0 and r2_rna < 0.5:
+        return "Morphology-Dominated"
+    if r2_rna >= 0.8 and r2_morph >= 0.8:
+        return "Shared Cross-Modal"
+    if r2_rna >= 0.8 and r2_morph < 0.8:
+        return "mRNA-Dominated"
+    return "Minor / Residual"
+
+
+def generate_mofa_factor_exploration_plots(
+    model_path,
+    out_dir,
+    go_gene_set="GO_Biological_Process_2023",
+    top_n_genes=16,
+    top_n_morph=12,
+    go_top_n_genes=60,
+    skip_go=False,
+):
+    """
+    Generates per-factor 3-panel exploration figures for every latent factor in a trained MOFA2 HDF5 model:
+      - Panel A: Top signed RNA gene loadings (W_RNA)
+      - Panel B: Top signed morphology feature loadings (W_Morph)
+      - Panel C: Top enriched GO Biological Process terms (Enrichr via gseapy on top |W_RNA| genes)
+    Also exports:
+      - 05_mofa_factor_go_enrichment_all_factors.csv
+      - 05_mofa_factor_exploration_summary.csv
+    """
+    import time
+    import h5py
+
+    if not os.path.exists(model_path):
+        print(f"[Factor Exploration] Model file not found: {model_path}")
+        return
+
+    setup_plot_style()
+    os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        import gseapy as gp
+        gseapy_ok = True
+    except ImportError:
+        gseapy_ok = False
+        if not skip_go:
+            print("[Factor Exploration] gseapy not installed; plotting loadings without GO enrichment.")
+
+    with h5py.File(model_path, "r") as f:
+        views = [v.decode() if isinstance(v, bytes) else str(v) for v in f["views/views"][:]]
+        r2 = f["variance_explained/r2_per_factor/group1"][:]
+        W_rna = f["expectations/W/RNA"][:]
+        W_img = f["expectations/W/Morphology"][:]
+        genes = [g.decode() if isinstance(g, bytes) else str(g) for g in f["features/RNA"][:]]
+        morphs = [m.decode() if isinstance(m, bytes) else str(m) for m in f["features/Morphology"][:]]
+
+    K = r2.shape[1]
+    rna_idx = views.index("RNA")
+    img_idx = views.index("Morphology")
+    if W_rna.shape[0] != K:
+        W_rna = W_rna.T
+    if W_img.shape[0] != K:
+        W_img = W_img.T
+
+    print(f"\n=== MOFA2 PER-FACTOR EXPLORATION & GO ENRICHMENT (K = {K}, model={os.path.basename(model_path)}) ===")
+    all_go_rows = []
+    summary_rows = []
+
+    for k in range(K):
+        fname = f"Factor {k + 1}"
+        r2_r = float(r2[rna_idx, k])
+        r2_m = float(r2[img_idx, k])
+        f_cat = _classify_mofa_factor(r2_r, r2_m)
+
+        wr = W_rna[k, :]
+        wm = W_img[k, :]
+
+        g_order = np.argsort(np.abs(wr))[::-1]
+        top_g_idx = g_order[:min(top_n_genes, len(genes))]
+        top_g_df = pd.DataFrame({
+            "Gene": [genes[i] for i in top_g_idx],
+            "Weight": [float(wr[i]) for i in top_g_idx],
+        }).iloc[::-1]
+
+        m_order = np.argsort(np.abs(wm))[::-1]
+        top_m_idx = m_order[:min(top_n_morph, len(morphs))]
+        top_m_df = pd.DataFrame({
+            "Feature": [morphs[i] for i in top_m_idx],
+            "Weight": [float(wm[i]) for i in top_m_idx],
+        }).iloc[::-1]
+
+        go_df = None
+        if not skip_go and gseapy_ok:
+            enrich_genes = list(dict.fromkeys(
+                _clean_gene_for_enrichr(genes[i]) for i in g_order[:min(go_top_n_genes, len(genes))]
+            ))
+            for attempt in range(3):
+                try:
+                    enr = gp.enrichr(
+                        gene_list=enrich_genes,
+                        gene_sets=[go_gene_set],
+                        organism="human",
+                        outdir=None,
+                    )
+                    go_df = enr.results.copy()
+                    break
+                except Exception as exc:
+                    if attempt == 2:
+                        print(f"[{fname}] Enrichr query skipped after 3 attempts: {exc}")
+                    else:
+                        time.sleep(1.5)
+
+        top_go_term = "N/A"
+        top_go_padj = np.nan
+        if go_df is not None and not go_df.empty:
+            go_df["Factor"] = fname
+            go_df = go_df.sort_values(["Adjusted P-value", "P-value"]).reset_index(drop=True)
+            all_go_rows.append(go_df.head(15))
+            top_go_term = _shorten_factor_label(go_df.loc[0, "Term"], max_len=48)
+            top_go_padj = float(go_df.loc[0, "Adjusted P-value"])
+            print(f"  [{fname:9s} | {f_cat:20s}] R2_RNA={r2_r:5.2f}%, R2_Morph={r2_m:5.2f}% | Top GO: {top_go_term} (q={top_go_padj:.2e})")
+        else:
+            print(f"  [{fname:9s} | {f_cat:20s}] R2_RNA={r2_r:5.2f}%, R2_Morph={r2_m:5.2f}% | Top GO: N/A")
+
+        summary_rows.append({
+            "Factor": fname,
+            "Category": f_cat,
+            "R2_RNA": round(r2_r, 2),
+            "R2_Morph": round(r2_m, 2),
+            "Top3_Genes": ", ".join(genes[i] for i in g_order[:3]),
+            "Top2_Morph": ", ".join(morphs[i] for i in m_order[:2]),
+            "Top_GO_BP": top_go_term,
+            "Top_GO_AdjP": top_go_padj,
+        })
+
+        fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.8), gridspec_kw={"width_ratios": [1.0, 1.15, 1.35]})
+
+        # Panel A: Top RNA gene loadings
+        ax = axes[0]
+        g_colors = ["#d62728" if w >= 0 else "#1f77b4" for w in top_g_df["Weight"]]
+        ax.barh(top_g_df["Gene"], top_g_df["Weight"], color=g_colors, edgecolor="white", height=0.72)
+        ax.axvline(0, color="#333333", linewidth=0.9)
+        ax.set_title(f"A. Top RNA Gene Loadings\n(RNA R² = {r2_r:.2f}%)", fontsize=10.5, fontweight="bold")
+        ax.set_xlabel("MOFA2 Weight (W_RNA)", fontsize=9)
+        ax.tick_params(axis="y", labelsize=8.5)
+        ax.grid(axis="x", alpha=0.35)
+
+        # Panel B: Top Morphology loadings
+        ax = axes[1]
+        m_colors = ["#e67e22" if w >= 0 else "#16a085" for w in top_m_df["Weight"]]
+        m_labels = [_shorten_factor_label(lbl, max_len=34) for lbl in top_m_df["Feature"]]
+        ax.barh(m_labels, top_m_df["Weight"], color=m_colors, edgecolor="white", height=0.72)
+        ax.axvline(0, color="#333333", linewidth=0.9)
+        ax.set_title(f"B. Top Morphology Loadings\n(Morphology R² = {r2_m:.2f}%)", fontsize=10.5, fontweight="bold")
+        ax.set_xlabel("MOFA2 Weight (W_Morph)", fontsize=9)
+        ax.tick_params(axis="y", labelsize=8.2)
+        ax.grid(axis="x", alpha=0.35)
+
+        # Panel C: Top 8 GO Biological Process terms
+        ax = axes[2]
+        if go_df is not None and not go_df.empty:
+            gplot = go_df.head(8).copy().iloc[::-1]
+            gplot["neg_log10_p"] = -np.log10(gplot["P-value"].clip(lower=1e-30))
+            gplot["ShortTerm"] = [_shorten_factor_label(t, max_len=42) for t in gplot["Term"]]
+            bar_cols = ["#2b5c8f" if q < 0.05 else "#95a5a6" for q in gplot["Adjusted P-value"]]
+            bars = ax.barh(gplot["ShortTerm"], gplot["neg_log10_p"], color=bar_cols, edgecolor="white", height=0.68)
+            for bar, (_, row) in zip(bars, gplot.iterrows()):
+                q_str = f"q={row['Adjusted P-value']:.1e}" if row["Adjusted P-value"] < 0.05 else f"q={row['Adjusted P-value']:.2f}"
+                ax.text(
+                    bar.get_width() + 0.08,
+                    bar.get_y() + bar.get_height() / 2.0,
+                    f"{row['Overlap']} ({q_str})",
+                    va="center", ha="left", fontsize=7.5, color="#222222",
+                )
+            ax.set_xlim(0, max(gplot["neg_log10_p"].max() * 1.42, 2.0))
+            ax.set_title(f"C. GO Biological Process Enrichment\n(Top {go_top_n_genes} |W_RNA| Genes; Blue: FDR < 0.05)", fontsize=10.5, fontweight="bold")
+            ax.set_xlabel("-log10(P-value)", fontsize=9)
+            ax.tick_params(axis="y", labelsize=8.0)
+            ax.grid(axis="x", alpha=0.35)
+        else:
+            msg = "GO enrichment skipped (--skip_factor_go)" if skip_go else "No Enrichr GO terms returned"
+            ax.text(0.5, 0.5, msg, ha="center", va="center", transform=ax.transAxes, fontsize=9)
+            ax.set_title("C. GO Biological Process Enrichment", fontsize=10.5, fontweight="bold")
+
+        plt.suptitle(
+            f"MOFA2 {fname} Exploration — {f_cat} (RNA R² = {r2_r:.2f}%, Morphology R² = {r2_m:.2f}%)",
+            fontsize=12.5, fontweight="bold", y=0.995,
+        )
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        out_png = os.path.join(out_dir, f"05_mofa_factor_exploration_F{k + 1:02d}.png")
+        plt.savefig(out_png, dpi=230)
+        plt.close()
+
+    if all_go_rows:
+        go_csv = os.path.join(out_dir, "05_mofa_factor_go_enrichment_all_factors.csv")
+        pd.concat(all_go_rows, ignore_index=True).to_csv(go_csv, index=False)
+        print(f"Saved per-factor GO enrichment table to: {os.path.abspath(go_csv)}")
+
+    sum_csv = os.path.join(out_dir, "05_mofa_factor_exploration_summary.csv")
+    pd.DataFrame(summary_rows).to_csv(sum_csv, index=False)
+    print(f"Saved per-factor exploration summary to: {os.path.abspath(sum_csv)}")
+    print(f"Saved {K} per-factor exploration figures (05_mofa_factor_exploration_F01..F{K:02d}.png) to: {os.path.abspath(out_dir)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="05: Multi-Omics Factor Analysis (MOFA2) Integration")
     parser.add_argument("--exp_dir", type=str, default=os.path.join("data", "expression"), help="10x expression directory (falls back to data/exp)")
@@ -852,6 +1070,16 @@ def main():
         "--reuse_model",
         action="store_true",
         help="Reuse existing HDF5 model file if present instead of retraining"
+    )
+    parser.add_argument(
+        "--skip_factor_exploration",
+        action="store_true",
+        help="Skip generating per-factor RNA/morphology weight and GO enrichment exploration figures"
+    )
+    parser.add_argument(
+        "--skip_factor_go",
+        action="store_true",
+        help="Skip online Enrichr GO Biological Process queries during per-factor exploration"
     )
     parser.add_argument(
         "--exclude_mt",
@@ -951,6 +1179,16 @@ def main():
         print(f"\nSaved MOFA2 multi-factor sweep summary to: {os.path.abspath(sweep_csv)}")
         all_rmse_df = pd.concat(rmse_frames, ignore_index=True) if rmse_frames else pd.DataFrame()
         plot_mofa_factor_sweep_comparison(sweep_df, all_rmse_df, args.out_dir)
+
+    if not args.skip_factor_exploration and sweep_records:
+        # Select primary model for per-factor exploration (K=10 if present in sweep, else middle/only K)
+        primary_k = 10 if 10 in factor_counts else factor_counts[len(factor_counts) // 2]
+        primary_rec = next(r for r in sweep_records if r["Factors_K"] == primary_k)
+        generate_mofa_factor_exploration_plots(
+            model_path=primary_rec["Model_Path"],
+            out_dir=args.out_dir,
+            skip_go=args.skip_factor_go,
+        )
 
 
 if __name__ == "__main__":
